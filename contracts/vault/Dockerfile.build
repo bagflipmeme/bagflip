@@ -1,0 +1,9 @@
+# Build image for the BAGFLIP vault: Rust + wasm target + cargo-near 0.23.0.
+#   docker build -t bagflip-build -f contracts/vault/Dockerfile.build contracts/vault
+#   docker run --rm -v "$PWD/contracts/vault:/work" -w /work bagflip-build cargo near build non-reproducible-wasm --no-abi
+#   docker run --rm -v "$PWD/contracts/vault:/work" -w /work bagflip-build cargo test
+FROM rust:1.99
+RUN apt-get update && apt-get install -y --no-install-recommends libudev-dev pkg-config && rm -rf /var/lib/apt/lists/*
+RUN rustup target add wasm32-unknown-unknown
+ENV CARGO_BUILD_JOBS=4
+RUN cargo install cargo-near --version 0.23.0 --locked

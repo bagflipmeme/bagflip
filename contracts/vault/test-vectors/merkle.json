@@ -1,0 +1,175 @@
+[
+  {
+    "epoch": 1,
+    "root": "54fb3c01a1b71a0b32a0d12a37c72c0225af83cc9cb716b6523e246eb9d7102d",
+    "total": "6000000000000000000000000",
+    "data_hash": "417a1383b251d97965e9aad2c321ec708b0744357e06da55aae10b6b78eb8c15",
+    "leaves": [
+      {
+        "account_id": "alice.near",
+        "amount": "6000000000000000000000000",
+        "leaf": "54fb3c01a1b71a0b32a0d12a37c72c0225af83cc9cb716b6523e246eb9d7102d",
+        "proof": []
+      }
+    ]
+  },
+  {
+    "epoch": 7,
+    "root": "b26ebf5d9bd577133a86382d63d1b69bc2a3c3107e14a155ee88ea8305d060ed",
+    "total": "10000000000000000000000000",
+    "data_hash": "6edca6d9fd192f34aa662d0dcf50c91c2618dbaf5400cc538eab0082c2624f61",
+    "leaves": [
+      {
+        "account_id": "alice.near",
+        "amount": "6000000000000000000000000",
+        "leaf": "818a49360c42fcedc175df549348dcd2aee3168a04acb516467c9c837768f7fb",
+        "proof": [
+          "3a8b69e5b635cc61890bc909962d11616462058c39e8aa3e5b49c37b869f12a9",
+          "47211190837e534ba0028930d9e3004f60c0acbaf6e2d7ed57f55ed1b703dc8e"
+        ]
+      },
+      {
+        "account_id": "bob.near",
+        "amount": "3000000000000000000000000",
+        "leaf": "3a8b69e5b635cc61890bc909962d11616462058c39e8aa3e5b49c37b869f12a9",
+        "proof": [
+          "818a49360c42fcedc175df549348dcd2aee3168a04acb516467c9c837768f7fb",
+          "47211190837e534ba0028930d9e3004f60c0acbaf6e2d7ed57f55ed1b703dc8e"
+        ]
+      },
+      {
+        "account_id": "carol.near",
+        "amount": "1000000000000000000000000",
+        "leaf": "47211190837e534ba0028930d9e3004f60c0acbaf6e2d7ed57f55ed1b703dc8e",
+        "proof": [
+          "ad8308c700df60d6a01cd1ad55d60274fc5fec6d054ebb925e8475db3f6df348"
+        ]
+      }
+    ]
+  },
+  {
+    "epoch": 42,
+    "root": "3b3393474d814a606f9c2d1edb30358a83c24ac09749498124ae38f5c064d8a6",
+    "total": "12986507827899672485738",
+    "data_hash": "824a33a4af804db64b12ef2564fcabaf1d6d126d2324824b8bd21a1f5a91b3e9",
+    "leaves": [
+      {
+        "account_id": "holder0.near",
+        "amount": "1180591620717534760213",
+        "leaf": "191d765e1a556aff6b9244a3eb16dd4b5e6c32d83848c5456fa7c28ffdb5cbed",
+        "proof": [
+          "3007aceb7b3deb2fc225b2429e511ca3a8edb4fe3cee6f65c689db4b7af5b76a",
+          "e38a35ec61ed78ed129c52946d06375424cf66c40ffdb4d28d1c34aae4c9c00d",
+          "1b186fe2c5480fefb1b09608f3835829e02ba4b07184f280a583cc568eb71959",
+          "0dcd6f1c6948e51e5c583551f287c950f7d4304ae28a3d90f5abda8798eea1bb"
+        ]
+      },
+      {
+        "account_id": "holder1.near",
+        "amount": "1180591620717658217002",
+        "leaf": "3007aceb7b3deb2fc225b2429e511ca3a8edb4fe3cee6f65c689db4b7af5b76a",
+        "proof": [
+          "191d765e1a556aff6b9244a3eb16dd4b5e6c32d83848c5456fa7c28ffdb5cbed",
+          "e38a35ec61ed78ed129c52946d06375424cf66c40ffdb4d28d1c34aae4c9c00d",
+          "1b186fe2c5480fefb1b09608f3835829e02ba4b07184f280a583cc568eb71959",
+          "0dcd6f1c6948e51e5c583551f287c950f7d4304ae28a3d90f5abda8798eea1bb"
+        ]
+      },
+      {
+        "account_id": "holder10.near",
+        "amount": "1180591620718769328103",
+        "leaf": "9da043f6f9a9525e13d052b195f8c1b46a6166d3679ae7b4cddda7bd8a782ecf",
+        "proof": [
+          "e71e0257160fe20f29413ccfc60db2afd3980db01c22764ab9e7ae6feb572ac2",
+          "f4eaca70ff44ce1658046070cf53c3fa4cf11fb9ec269cefc73cf32189c7c5a0",
+          "1b186fe2c5480fefb1b09608f3835829e02ba4b07184f280a583cc568eb71959",
+          "0dcd6f1c6948e51e5c583551f287c950f7d4304ae28a3d90f5abda8798eea1bb"
+        ]
+      },
+      {
+        "account_id": "holder2.near",
+        "amount": "1180591620717781673791",
+        "leaf": "e71e0257160fe20f29413ccfc60db2afd3980db01c22764ab9e7ae6feb572ac2",
+        "proof": [
+          "9da043f6f9a9525e13d052b195f8c1b46a6166d3679ae7b4cddda7bd8a782ecf",
+          "f4eaca70ff44ce1658046070cf53c3fa4cf11fb9ec269cefc73cf32189c7c5a0",
+          "1b186fe2c5480fefb1b09608f3835829e02ba4b07184f280a583cc568eb71959",
+          "0dcd6f1c6948e51e5c583551f287c950f7d4304ae28a3d90f5abda8798eea1bb"
+        ]
+      },
+      {
+        "account_id": "holder3.near",
+        "amount": "1180591620717905130580",
+        "leaf": "98e922c84459ba52b5c1dfe31d702db97305160812f9c36d69d642517d9083fb",
+        "proof": [
+          "d9696fccecff8f57cbab432531fd4a93a3b6b42b57b9f291fc201101e8a7ebe8",
+          "093757e2cf6437a52fe3b5bc0bb1e5013ce8aebae20ed218f6c3ef56a6bc8a7f",
+          "7b2166442ad296185d1eba577cebde612ac0f44969d3aeb862d03e54d4fa41f5",
+          "0dcd6f1c6948e51e5c583551f287c950f7d4304ae28a3d90f5abda8798eea1bb"
+        ]
+      },
+      {
+        "account_id": "holder4.near",
+        "amount": "1180591620718028587369",
+        "leaf": "d9696fccecff8f57cbab432531fd4a93a3b6b42b57b9f291fc201101e8a7ebe8",
+        "proof": [
+          "98e922c84459ba52b5c1dfe31d702db97305160812f9c36d69d642517d9083fb",
+          "093757e2cf6437a52fe3b5bc0bb1e5013ce8aebae20ed218f6c3ef56a6bc8a7f",
+          "7b2166442ad296185d1eba577cebde612ac0f44969d3aeb862d03e54d4fa41f5",
+          "0dcd6f1c6948e51e5c583551f287c950f7d4304ae28a3d90f5abda8798eea1bb"
+        ]
+      },
+      {
+        "account_id": "holder5.near",
+        "amount": "1180591620718152044158",
+        "leaf": "80dfaf70e7faee2de4d4ad2db4b082793cfc04cf4ef9c9a3a249cb2c77f4ac78",
+        "proof": [
+          "132cb41066201646f3e6fc0c6c7bfa3552b0f3f646e4bcdbbe77fa98b12c8dad",
+          "77d6ce6000cfd9977adfd5a235e349e75f9f37aca0638fa6039a0b1192c7a494",
+          "7b2166442ad296185d1eba577cebde612ac0f44969d3aeb862d03e54d4fa41f5",
+          "0dcd6f1c6948e51e5c583551f287c950f7d4304ae28a3d90f5abda8798eea1bb"
+        ]
+      },
+      {
+        "account_id": "holder6.near",
+        "amount": "1180591620718275500947",
+        "leaf": "132cb41066201646f3e6fc0c6c7bfa3552b0f3f646e4bcdbbe77fa98b12c8dad",
+        "proof": [
+          "80dfaf70e7faee2de4d4ad2db4b082793cfc04cf4ef9c9a3a249cb2c77f4ac78",
+          "77d6ce6000cfd9977adfd5a235e349e75f9f37aca0638fa6039a0b1192c7a494",
+          "7b2166442ad296185d1eba577cebde612ac0f44969d3aeb862d03e54d4fa41f5",
+          "0dcd6f1c6948e51e5c583551f287c950f7d4304ae28a3d90f5abda8798eea1bb"
+        ]
+      },
+      {
+        "account_id": "holder7.near",
+        "amount": "1180591620718398957736",
+        "leaf": "e958a791ef6d3bc0bf019e646860c037e98146b495dbc2d9aa14e88bb54048e5",
+        "proof": [
+          "545701c2560208ede094d608a3e887c622693fb4c7d4d986e7a4571482ba15be",
+          "bdb9501ca994a733cd43a4ea87410b1fa6dba4e480b34c3d1336c27a0f1a9a28",
+          "53037e4c4112d83afe681c06c824d1dc576bb5e3c6e4a6443cd5ea20cec80d77"
+        ]
+      },
+      {
+        "account_id": "holder8.near",
+        "amount": "1180591620718522414525",
+        "leaf": "545701c2560208ede094d608a3e887c622693fb4c7d4d986e7a4571482ba15be",
+        "proof": [
+          "e958a791ef6d3bc0bf019e646860c037e98146b495dbc2d9aa14e88bb54048e5",
+          "bdb9501ca994a733cd43a4ea87410b1fa6dba4e480b34c3d1336c27a0f1a9a28",
+          "53037e4c4112d83afe681c06c824d1dc576bb5e3c6e4a6443cd5ea20cec80d77"
+        ]
+      },
+      {
+        "account_id": "holder9.near",
+        "amount": "1180591620718645871314",
+        "leaf": "bdb9501ca994a733cd43a4ea87410b1fa6dba4e480b34c3d1336c27a0f1a9a28",
+        "proof": [
+          "eb964fee5da088dbd75a7b396ac4654d508e9b5383fa44e8a65a5d4b04f00927",
+          "53037e4c4112d83afe681c06c824d1dc576bb5e3c6e4a6443cd5ea20cec80d77"
+        ]
+      }
+    ]
+  }
+]
