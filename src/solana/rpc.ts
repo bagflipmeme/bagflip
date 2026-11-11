@@ -18,7 +18,7 @@ import bs58 from "bs58";
 
 export const WSOL_MINT = "So11111111111111111111111111111111111111112";
 export const TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
-export const TOKEN_2022_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PQ1h6Ktv3iAQiP4t";
+export const TOKEN_2022_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 
 export interface SignatureState {
   state: "confirmed" | "failed" | "not_found";

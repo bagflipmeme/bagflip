@@ -243,7 +243,8 @@ export class DexScreenerMarket implements MarketDataProvider {
     this.lastGeckoPoll = now;
     const feeds: [string, DiscoveryEvent["source"]][] = [
       ["/networks/solana/trending_pools?page=1&duration=5m", "trending"],
-      ["/networks/solana/dexes/pumpswap/pools?page=1&sort=pool_created_at_desc", "new_pool"],
+      // (dexes/pumpswap/pools rejects sort=pool_created_at_desc with HTTP 400; new_pools carries the dex id)
+      ["/networks/solana/new_pools?page=1", "new_pool"],
       ["/networks/solana/dexes/pump-fun/pools?page=1&sort=h24_tx_count_desc", "curve_active"],
     ];
     for (const [path, source] of feeds) {
@@ -251,16 +252,21 @@ export class DexScreenerMarket implements MarketDataProvider {
         await this.limiterGecko.take();
         const res = await fetch(`${GECKO}${path}`, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(15_000) });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const j = (await res.json()) as { data?: { attributes?: { pool_created_at?: string }; relationships?: { base_token?: { data?: { id?: string } } } }[] };
+        const j = (await res.json()) as { data?: { attributes?: { pool_created_at?: string }; relationships?: { base_token?: { data?: { id?: string } }; dex?: { data?: { id?: string } } } }[] };
         for (const p of j.data ?? []) {
           const id = p.relationships?.base_token?.data?.id ?? "";
           if (!id.startsWith("solana_")) continue;
           const mint = id.slice(7);
           if (mint === WSOL_MINT) continue;
           const created = p.attributes?.pool_created_at ? Date.parse(p.attributes.pool_created_at) : now;
-          // A brand-new PumpSwap pool is a graduation.
-          if (source === "new_pool" && now - created < 2 * 3_600_000) this.add({ mint, source: "migration", at: created });
-          else this.add({ mint, source, at: now });
+          const dex = p.relationships?.dex?.data?.id;
+          if (source === "new_pool") {
+            // A brand-new PumpSwap pool is a graduation; other new pools are ordinary launches.
+            if (dex === "pumpswap" && now - created < 2 * 3_600_000) this.add({ mint, source: "migration", at: created });
+            else if (dex === "pump-fun") this.add({ mint, source: "new_token", at: created });
+            continue;
+          }
+          this.add({ mint, source, at: now });
         }
       } catch (e) {
         this.log.warn("geckoterminal discovery failed", { path, error: String(e) });
