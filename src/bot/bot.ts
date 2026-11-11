@@ -21,6 +21,7 @@ import { esc } from "../shared/outbox.ts";
 import { DISCLOSURES, HELP, MODE_LABEL, governanceMessage, pnlMessage, powerLine, statusMessage, tradesMessage, treasuryMessage, voteKeyboard } from "./views.ts";
 import type { Choice } from "../governance/engine.ts";
 import { RateLimiter } from "../market/dexscreener.ts";
+import { funnelReport, experimentReport, formatFunnel, formatExperiment } from "../trading/report.ts";
 
 const HTML = { parse_mode: "HTML" as const, link_preview_options: { is_disabled: true } };
 
@@ -90,6 +91,10 @@ export function createBot(app: App, opts: { botInfo?: UserFromGetMe } = {}) {
   });
 
   bot.command("help", (ctx) => ctx.reply(HELP(cfg), HTML));
+  // Numeric ids are what TELEGRAM_ADMIN_IDS / TELEGRAM_GROUP_ID need (usernames can change hands).
+  bot.command("whoami", (ctx) =>
+    ctx.reply(`Your Telegram user ID: <code>${ctx.from?.id}</code>\nThis chat ID: <code>${ctx.chat?.id}</code>${isAdmin(ctx) ? "\nYou are a BAGFLIP admin." : ""}`, HTML),
+  );
   bot.command("disclosures", (ctx) => ctx.reply(DISCLOSURES(cfg), HTML));
 
   bot.command("connect", async (ctx) => {
@@ -153,6 +158,27 @@ export function createBot(app: App, opts: { botInfo?: UserFromGetMe } = {}) {
     }
   });
 
+  bot.command("council", async (ctx) => {
+    const [seats, st] = await Promise.all([app.vault.seats(), app.vault.status()]);
+    const now = clock.now().getTime();
+    const ageMs = cfg.VAULT_SEAT_MIN_AGE_HOURS * 3_600_000;
+    const lines = [
+      "<b>BAGFLIP Holder Council</b>",
+      `The top ${cfg.VAULT_COUNCIL_SEATS} ${esc(cfg.MEME_TOKEN_SYMBOL)} holders guard the vault <code>${esc(cfg.TREASURY_NEAR_ADDRESS)}</code>. Seats are decided on chain by token balance; anyone holding more can take a seat.`,
+      `Veto a payout list / AUTO HUNT activation or pause: <b>${st.veto_votes_required ?? cfg.VAULT_VETO_THRESHOLD}</b> seats · admin changes & unpause: <b>${st.admin_votes_required ?? cfg.VAULT_ADMIN_THRESHOLD}</b> seats.`,
+      "",
+    ];
+    if (!seats.length) lines.push("<i>No seats filled yet.</i>");
+    const sorted = [...seats].sort((a, b) => (BigInt(b.balance) > BigInt(a.balance) ? 1 : -1));
+    sorted.forEach((s, i) => {
+      const since = Number(BigInt(s.since_ns) / 1_000_000n);
+      const voting = now - since >= ageMs ? "votes" : `votes after ${new Date(since + ageMs).toISOString().slice(0, 16).replace("T", " ")} UTC`;
+      lines.push(`${i + 1}. <code>${esc(s.account_id)}</code> — ${formatUnits(BigInt(s.balance), cfg.MEME_TOKEN_DECIMALS, 0)} ${esc(cfg.MEME_TOKEN_SYMBOL)} (${voting})`);
+    });
+    lines.push("", `Take a seat: <code>near contract call-function as-transaction ${esc(cfg.TREASURY_NEAR_ADDRESS)} claim_seat json-args '{"candidate":"you.near","replace":"&lt;smallest seat&gt;"}' ...</code>`);
+    await ctx.reply(lines.join("\n"), HTML);
+  });
+
   bot.command("status", async (ctx) => ctx.reply(await statusMessage(db, cfg, app.prices, clock.now()), HTML));
   bot.command("treasury", async (ctx) => ctx.reply(await treasuryMessage(db, cfg, app.prices), HTML));
   bot.command("trades", async (ctx) => ctx.reply(await tradesMessage(db, cfg), HTML));
@@ -196,7 +222,7 @@ export function createBot(app: App, opts: { botInfo?: UserFromGetMe } = {}) {
         "<b>Claimable rewards</b>",
         ...ws.map((w) => `• <code>${esc(w.account_id)}</code>: ${formatAsset(c.get(w.account_id) ?? 0n, "NEAR")}`),
         "",
-        `Payouts are made by the vault contract <code>${esc(cfg.TREASURY_NEAR_ADDRESS)}</code>, only to the wallet named in the on-chain payout list, after its guardian veto window.`,
+        `Payouts are made by the vault contract <code>${esc(cfg.TREASURY_NEAR_ADDRESS)}</code>, only to the wallet named in the on-chain payout list, after its Holder Council veto window.`,
         `Prefer to claim yourself? Proofs: ${esc(cfg.PUBLIC_URL)}/public/proofs/&lt;your-account&gt;`,
       ].join("\n"),
       { ...HTML, reply_markup: new InlineKeyboard().text(`Claim ${formatAsset(total, "NEAR")}`, "claim:go") },
@@ -237,6 +263,15 @@ export function createBot(app: App, opts: { botInfo?: UserFromGetMe } = {}) {
     if (!hash) return ctx.reply("Usage: /deposit <near_tx_hash>");
     const r = await creditDepositTx({ db, clock, cfg, chain: app.chain, prices: app.prices }, hash, `tg:${ctx.from!.id}`);
     await ctx.reply(`Credited ${r.credited} transfer(s); ${r.unattributed} unattributed.`);
+  });
+  admin("funnel", async (ctx) => {
+    const hours = Number(ctx.match.trim() || 24);
+    const variants = [app.hunt.vc.name, ...app.hunt.shadows.map((s) => s.label)];
+    for (const v of variants) await ctx.reply(formatFunnel(await funnelReport(db, v, hours)), HTML);
+  });
+  admin("experiment", async (ctx) => {
+    if (!app.hunt.shadows.length) return ctx.reply("No shadow variants running. Set SHADOW_VARIANTS=original,aggressive.");
+    await ctx.reply(formatExperiment(await experimentReport(db, app.hunt.shadows)), HTML);
   });
   admin("post_governance", async (ctx) => {
     if (!cfg.TELEGRAM_GROUP_ID) return ctx.reply("TELEGRAM_GROUP_ID not set");

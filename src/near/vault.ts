@@ -11,7 +11,7 @@ import type { Clock } from "../shared/time.ts";
 import type { NearRpc, RawTxStatus } from "./rpc.ts";
 import type { NearSigner } from "./signer.ts";
 import { TGAS } from "./signer.ts";
-import { buildPayoutTree } from "../distribution/merkle.ts";
+import { verifyProof as verifyLeaf } from "../distribution/merkle.ts";
 
 export type VaultMode = "Inactive" | "Distribute" | "AutoHunt";
 
@@ -26,6 +26,16 @@ export interface VaultStatus {
   hunt_used_24h: string;
   hunt_remaining_24h: string;
   last_epoch: number;
+  seats_filled?: number;
+  eligible_seats?: number;
+  veto_votes_required?: number;
+  admin_votes_required?: number;
+}
+
+export interface VaultSeat {
+  account_id: string;
+  balance: string;
+  since_ns: string;
 }
 
 export interface VaultDistribution {
@@ -68,6 +78,8 @@ export interface VaultPort {
   status(): Promise<VaultStatus>;
   distribution(epoch: number): Promise<VaultDistribution | null>;
   isClaimed(epoch: number, accountId: string): Promise<boolean>;
+  /** Holder Council seats (top holders, contested on chain). */
+  seats(): Promise<VaultSeat[]>;
   /** Sign an operator call without sending it (persist the result first). */
   prepare(call: VaultCall): Promise<VaultTx>;
   /** Broadcast (idempotent for the same bytes) and wait for the final outcome. */
@@ -123,6 +135,9 @@ export class RpcVault implements VaultPort {
   isClaimed(epoch: number, accountId: string) {
     return this.rpc.viewAt<boolean>(this.accountId, "is_claimed", { epoch, account_id: accountId });
   }
+  seats() {
+    return this.rpc.viewAt<VaultSeat[]>(this.accountId, "get_seats", {});
+  }
   async prepare(call: VaultCall): Promise<VaultTx> {
     if (!this.signer) throw new Error("vault operator key not configured (LIVE_TRANSFERS_ENABLED=false)");
     const s = await this.signer.sign(this.accountId, [{ type: "functionCall", method: call.method, args: call.args, gas: call.gas ?? 150n * TGAS, deposit: 0n }]);
@@ -169,6 +184,12 @@ export interface SimVaultConfig {
   modeDelayMs: number;
   distributionDelayMs: number;
   dailyHuntCap: bigint;
+  seatsMax?: number;
+  minSeatBalance?: bigint;
+  /** Accounts that can never hold a seat (vault/token/operator added automatically by the caller). */
+  excluded?: string[];
+  /** Current token balance, like the contract's ft_balance_of cross-call. */
+  balanceOf?: (accountId: string) => Promise<bigint>;
 }
 
 /** Faithful in-memory model of the contract's rules (balances are enforced by the BAGFLIP ledger). */
@@ -187,6 +208,7 @@ export class SimVault implements VaultPort {
   dists = new Map<number, VaultDistribution>();
   claimed = new Set<string>();
   window: { at: number; amount: bigint }[] = [];
+  seatList: VaultSeat[] = [];
   private txs = new Map<string, { call: VaultCall; result?: VaultOutcome }>();
   private n = 0;
 
@@ -234,6 +256,9 @@ export class SimVault implements VaultPort {
   async isClaimed(epoch: number, accountId: string) {
     return this.claimed.has(`${epoch}:${accountId}`);
   }
+  async seats() {
+    return this.seatList.map((x) => ({ ...x }));
+  }
   async prepare(call: VaultCall): Promise<VaultTx> {
     const hash = `sim-vault-${++this.n}-${call.method}`;
     this.txs.set(hash, { call });
@@ -244,7 +269,7 @@ export class SimVault implements VaultPort {
     if (!t) return { state: "expired", events: [] };
     if (!t.result) {
       try {
-        t.result = { state: "success", events: this.exec(t.call) };
+        t.result = { state: "success", events: await this.exec(t.call) };
       } catch (e) {
         t.result = { state: "failure", events: [], error: e instanceof Error ? e.message : String(e) };
       }
@@ -255,7 +280,7 @@ export class SimVault implements VaultPort {
     return this.send(tx);
   }
 
-  /** Guardian action (tests / dev): veto a pending list. */
+  /** Council action reaching the veto threshold (tests / dev): veto a pending list. */
   vetoDistribution(epoch: number) {
     const d = this.dists.get(epoch);
     if (!d || d.vetoed || this.now() * 1 >= Number(BigInt(d.activates_ns) / NS)) throw new Error("cannot veto");
@@ -267,7 +292,7 @@ export class SimVault implements VaultPort {
     this.pending = null;
   }
 
-  private exec(c: VaultCall): VaultEvent[] {
+  private async exec(c: VaultCall): Promise<VaultEvent[]> {
     const a = c.args as Record<string, any>;
     const now = this.now();
     switch (c.method) {
@@ -344,11 +369,31 @@ export class SimVault implements VaultPort {
       }
       case "unwrap":
         return [];
+      case "claim_seat": {
+        // Mirrors the contract: balances read at call time; the larger CURRENT holder takes the seat.
+        const cand = a.candidate as string;
+        const max = this.cfg.seatsMax ?? 10;
+        const min = this.cfg.minSeatBalance ?? 1n;
+        if ((this.cfg.excluded ?? []).includes(cand) || cand === this.accountId) throw new Error("this account cannot hold a seat");
+        if (this.seatList.some((x) => x.account_id === cand)) throw new Error("already seated");
+        const bal = this.cfg.balanceOf ? await this.cfg.balanceOf(cand) : 0n;
+        const since = (BigInt(now) * NS).toString();
+        if (!a.replace) {
+          if (this.seatList.length >= max) throw new Error("council is full: name a seat to contest");
+          if (bal < min) return [{ event: "seat_rejected", data: { candidate: cand, balance: bal.toString() } }];
+          this.seatList.push({ account_id: cand, balance: bal.toString(), since_ns: since });
+          return [{ event: "seat_won", data: { account_id: cand } }];
+        }
+        const idx = this.seatList.findIndex((x) => x.account_id === a.replace);
+        if (idx < 0) throw new Error("that account does not hold a seat");
+        const tb = this.cfg.balanceOf ? await this.cfg.balanceOf(a.replace) : 0n;
+        if (bal <= tb || bal < min) return [{ event: "seat_rejected", data: { candidate: cand, balance: bal.toString(), target: a.replace } }];
+        this.seatList[idx] = { account_id: cand, balance: bal.toString(), since_ns: since };
+        return [{ event: "seat_won", data: { seat: { account_id: cand }, replaced: a.replace } }];
+      }
       default:
         throw new Error(`unknown vault method ${c.method}`);
     }
   }
 }
 
-import { verifyProof as verifyLeaf } from "../distribution/merkle.ts";
-export { buildPayoutTree };

@@ -19,7 +19,8 @@ Mini App.
 [docs/VAULT.md](docs/VAULT.md).
 * Money leaves it only as claims to the accounts in a published payout list, or as capped transfers
   to the trading route.
-* AUTO HUNT activation and every payout list are time-locked, and independent guardians can veto them.
+* AUTO HUNT activation and every payout list are time-locked, and the **Holder Council** can veto them.
+  The council is the top 10 BAGFLIP holders, decided on chain by token balance.
 * The bot holds only an operator key that can call those vault methods and nothing else.
 
 ## How it works
@@ -219,7 +220,7 @@ claimable distributions, treasury failures and pauses.
 
 ## Tests
 
-`pnpm test` runs 69 tests against embedded Postgres, with no network. The vault contract adds 11 Rust
+`pnpm test` runs 70 tests against embedded Postgres, with no network. The vault contract adds 17 Rust
 tests (see docs/VAULT.md). They cover every scenario in the
 brief:
 
@@ -264,9 +265,10 @@ They also cover:
 * Pro-rata distribution and claims (payout simulated outside live), and the holder index from FastNEAR
   event history.
 * Telegram bot handlers and the HTTP API. The app boots under Node 24 in development mode.
-* The vault contract compiles to wasm, and its 11 unit tests pass. They cover:
+* The vault contract compiles to wasm, and its 17 unit tests pass. They cover:
   * claims only paying the listed account, once, after the veto window
   * vetoes, the time-locked AUTO HUNT and the 24h cap
+  * the on-chain Holder Council (seat contests by balance, seat age, vote thresholds)
   * pause and admin thresholds
   * Merkle vectors shared with the TypeScript side
 
@@ -284,7 +286,7 @@ They also cover:
   PumpPortal `trade-local` fallback, with simulation before send and token-account close. Not yet run with
   a signing key; it needs a funded `TRADING_WALLET_ADDRESS` key and `LIVE_TRADING_ENABLED=true`. Do a
   first live run with a tiny balance.
-* **The vault contract on mainnet.** It builds (234 KB wasm) and passes 11 unit tests, plus the bot's
+* **The vault contract on mainnet.** It builds (256 KB wasm) and passes 17 unit tests, plus the bot's
   integration tests against an identical in-process model. It is **not deployed** and has not been run
   in the NEAR sandbox or on testnet.
   * Rehearse on testnet (a tiny payout list, a claim, a veto) before deploying to `bagflip.near`.

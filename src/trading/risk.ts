@@ -32,8 +32,8 @@ export async function canOpenPositions(db: Db, cfg: Config, clock: Clock, mode: 
   const reasons: string[] = [];
   const gov = await currentMode(db);
   if (gov !== "AUTO_HUNT") reasons.push("governance mode is not AUTO HUNT");
-  else if (vault && vault.mode !== "AutoHunt") reasons.push("vault has not activated AUTO HUNT yet (time-lock or guardian veto)");
-  if (vault?.paused) reasons.push("vault is paused by a guardian");
+  else if (vault && vault.mode !== "AutoHunt") reasons.push("vault has not activated AUTO HUNT yet (time-lock or council veto)");
+  if (vault?.paused) reasons.push("vault is paused");
   if (cfg.EMERGENCY_PAUSE || (await getState<boolean>(db, "emergency_pause")) === true) reasons.push("emergency pause is active");
   if (mode === "live" && !cfg.liveTrading) reasons.push("live trading is not enabled");
   const h = await getHealth(db);

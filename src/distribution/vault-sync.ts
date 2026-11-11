@@ -1,9 +1,9 @@
 /**
  * Mirrors BAGFLIP's off-chain decisions into the vault contract, where they are time-locked and
- * guardian-vetoable:
+ * vetoable by the Holder Council (the top holders):
  *  - every distribution event → propose_distribution(epoch, merkle root, total, data hash)
  *  - every daily decision     → propose_mode(cycle, mode, snapshot hash)
- * and watches the vault for guardian vetoes (a vetoed list's money returns to the distribution pool
+ * and watches the vault for council vetoes (a vetoed list's money returns to the distribution pool
  * and is re-distributed from a fresh snapshot).
  *
  * Every operator transaction is signed and persisted before broadcast; retries re-send the same bytes
@@ -145,7 +145,7 @@ export async function syncMode(d: VaultDeps, cycleId: string): Promise<string> {
     const proposed = o.events.find((e) => e.event === "mode_proposed");
     if (proposed) {
       const eta = new Date(Number(BigInt(String(proposed.data.eta_ns)) / 1_000_000n));
-      await notify(d.db, d.clock, `vault-mode-eta:${cycleId}`, "mode_change", `⏳ AUTO HUNT is time-locked in the vault until ${eta.toISOString().slice(0, 16).replace("T", " ")} UTC. Guardians can veto until then.`);
+      await notify(d.db, d.clock, `vault-mode-eta:${cycleId}`, "mode_change", `⏳ AUTO HUNT is time-locked in the vault until ${eta.toISOString().slice(0, 16).replace("T", " ")} UTC. The Holder Council can veto until then.`);
     }
     return "done";
   }
@@ -156,7 +156,7 @@ export async function syncMode(d: VaultDeps, cycleId: string): Promise<string> {
 
 // ───────────── watcher ─────────────
 
-/** Cache vault status, detect guardian vetoes, unwrap returned wNEAR (live). */
+/** Cache vault status, detect council vetoes, unwrap returned wNEAR (live). */
 export async function watchVault(d: VaultDeps): Promise<{ vetoed: number }> {
   const st = await d.vault.status();
   await setState(d.db, "vault_status", { ...st, at: d.clock.now().toISOString() });
@@ -179,7 +179,7 @@ export async function watchVault(d: VaultDeps): Promise<{ vetoed: number }> {
   return { vetoed };
 }
 
-/** A guardian vetoed a payout list: return its money to the pool and cancel claims against it. */
+/** The council vetoed a payout list: return its money to the pool and cancel claims against it. */
 export async function handleVeto(d: VaultDeps, eventId: string) {
   await d.db.tx(async (tx) => {
     const upd = await tx.query("UPDATE vault_distributions SET status='vetoed', updated_at=$2 WHERE event_id=$1 AND status <> 'vetoed' RETURNING total", [eventId, d.clock.now().toISOString()]);
@@ -190,7 +190,7 @@ export async function handleVeto(d: VaultDeps, eventId: string) {
       [eventId],
     );
     for (const c of claims.rows) {
-      await tx.query("UPDATE reward_claims SET status='cancelled', error='payout list vetoed by a guardian', updated_at=$2 WHERE id=$1", [c.claim_id, d.clock.now().toISOString()]);
+      await tx.query("UPDATE reward_claims SET status='cancelled', error='payout list vetoed by the Holder Council', updated_at=$2 WHERE id=$1", [c.claim_id, d.clock.now().toISOString()]);
       await tx.query("DELETE FROM reward_claim_items WHERE claim_id=$1", [c.claim_id]);
     }
     const unpaid = await tx.query<{ s: string }>(
@@ -212,7 +212,7 @@ export async function handleVeto(d: VaultDeps, eventId: string) {
         ],
       });
     }
-    await notify(tx, d.clock, `dist-veto:${eventId}`, "failure", `🛑 A guardian vetoed payout list #${eventId}. ${formatAsset(amount, "NEAR")} returns to the distribution pool and will be re-distributed from a fresh snapshot.`);
+    await notify(tx, d.clock, `dist-veto:${eventId}`, "failure", `🛑 The Holder Council vetoed payout list #${eventId}. ${formatAsset(amount, "NEAR")} returns to the distribution pool and will be re-distributed from a fresh snapshot.`);
   });
 }
 
@@ -229,4 +229,48 @@ export async function proofsFor(db: Db, accountId: string) {
     out.push({ epoch: Number(row.event_id), amount: row.amount, proof: t.proofs.get(accountId) ?? [], root: row.root, status: row.status, activates_at: row.activates_at });
   }
   return out;
+}
+
+// ───────────── Holder Council seats ─────────────
+
+/**
+ * Keep the vault's Holder Council equal to the current top holders. The bot only NOMINATES: the
+ * contract reads both balances from the token contract and seats the larger holder, so the bot cannot
+ * seat anyone who is not actually a top holder. Anyone else can nominate too (near-cli `claim_seat`).
+ */
+export async function syncSeats(d: VaultDeps, holders: { discover(): Promise<{ accounts: string[] }> }, maxTx = 5): Promise<{ nominated: string[] }> {
+  if (!d.vault.canSign) return { nominated: [] };
+  const excluded = new Set([...d.cfg.EXCLUDED_HOLDER_ACCOUNTS, d.cfg.TREASURY_NEAR_ADDRESS, d.cfg.MEME_TOKEN_CONTRACT_ID, d.cfg.OPERATOR_ACCOUNT_ID, "wrap.near"].filter(Boolean).map((a) => a.toLowerCase()));
+  const disc = await holders.discover();
+  const candidates = disc.accounts.map((a) => a.toLowerCase()).filter((a) => !excluded.has(a));
+  const block = await d.chain.finalBlock();
+  const seats = await d.vault.seats();
+  const seated = new Set(seats.map((s) => s.account_id));
+  const bal = await d.chain.ftBalances(d.cfg.MEME_TOKEN_CONTRACT_ID, [...new Set([...candidates, ...seated])], block);
+  const top = candidates
+    .map((a) => ({ a, b: bal.get(a) ?? 0n }))
+    .filter((x) => x.b >= d.cfg.vaultMinSeatBalance)
+    .sort((x, y) => (y.b > x.b ? 1 : y.b < x.b ? -1 : 0))
+    .slice(0, d.cfg.VAULT_COUNCIL_SEATS);
+  const current = seats.map((s) => ({ a: s.account_id, b: bal.get(s.account_id) ?? 0n }));
+  const nominated: string[] = [];
+  for (const c of top) {
+    if (nominated.length >= maxTx) break;
+    if (seated.has(c.a)) continue;
+    let replace: string | null = null;
+    if (current.length >= d.cfg.VAULT_COUNCIL_SEATS) {
+      current.sort((x, y) => (x.b < y.b ? -1 : x.b > y.b ? 1 : 0));
+      if (!(current[0]!.b < c.b)) break; // weakest seat already holds more
+      replace = current[0]!.a;
+    }
+    const tx = await d.vault.prepare({ method: "claim_seat", args: { candidate: c.a, replace }, gas: 60n * TGAS });
+    const o = await d.vault.send(tx);
+    if (o.state === "success" && o.events.some((e) => e.event === "seat_won")) {
+      nominated.push(c.a);
+      if (replace) current.splice(current.findIndex((x) => x.a === replace), 1);
+      current.push(c);
+      seated.add(c.a);
+    }
+  }
+  return { nominated };
 }

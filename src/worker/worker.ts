@@ -10,7 +10,7 @@ import { routeTreasury, scanDeposits } from "../treasury/treasury.ts";
 import { fundTrading, pollTransfer, recoverBridge, returnToTreasury } from "../bridge/bridge.ts";
 import { runDistribution } from "../distribution/distribution.ts";
 import { payClaim } from "../distribution/claims.ts";
-import { proposeDistribution, syncMode, watchVault } from "../distribution/vault-sync.ts";
+import { proposeDistribution, syncMode, syncSeats, watchVault } from "../distribution/vault-sync.ts";
 import { reconcile } from "../trading/reconcile.ts";
 import { notify } from "../shared/outbox.ts";
 import { decisionAnnouncement } from "../bot/views.ts";
@@ -87,6 +87,7 @@ export function registerHandlers(app: App, runner: JobRunner) {
   every("governance.tally", 300, async () => computeLiveTally(gov));
   every("trading.reconcile", app.cfg.RECONCILE_INTERVAL_SECONDS, async () => reconcile(app.db, app.cfg, app.clock, app.exec, app.chain));
   every("vault.watch", 60, async () => watchVault(vdeps));
+  every("vault.sync_seats", 6 * 3600, async () => syncSeats(vdeps, app.holders));
   every("treasury.route_periodic", 3600, async () => routeTreasury(treas, `periodic:${app.clock.now().toISOString().slice(0, 13)}`));
 }
 
@@ -99,7 +100,7 @@ export async function startWorker(app: App) {
   // Boot recovery: governance schedule, in-flight bridge transfers, recurring jobs.
   await scheduleDecisions({ db: app.db, chain: app.chain, clock: app.clock, cfg: app.cfg });
   const recovered = await recoverBridge(app.bridge);
-  for (const t of ["treasury.scan_deposits", "governance.tally", "trading.reconcile", "treasury.route_periodic", "vault.watch"]) {
+  for (const t of ["treasury.scan_deposits", "governance.tally", "trading.reconcile", "treasury.route_periodic", "vault.watch", "vault.sync_seats"]) {
     await upsertRecurring(app.db, app.clock, { type: t, key: `recurring:${t}` });
     // A recurring job left 'running' by a crash is picked up again once its lease expires.
   }

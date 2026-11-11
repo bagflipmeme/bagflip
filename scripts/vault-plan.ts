@@ -11,22 +11,31 @@ import { parseUnits, NEAR_DECIMALS } from "../src/shared/money.ts";
 const e = process.env;
 const vault = e.TREASURY_NEAR_ADDRESS || "bagflip.near";
 const operator = e.OPERATOR_ACCOUNT_ID || "bagflip-bot.near";
-const guardians = (e.VAULT_GUARDIANS || "").split(",").map((s) => s.trim()).filter(Boolean);
-const threshold = Number(e.VAULT_GUARDIAN_THRESHOLD || 2);
+const token = e.MEME_TOKEN_CONTRACT_ID || "";
+const decimals = Number(e.MEME_TOKEN_DECIMALS || 18);
+const excluded = (e.EXCLUDED_HOLDER_ACCOUNTS || "").split(",").map((s) => s.trim()).filter(Boolean);
+const seats = Number(e.VAULT_COUNCIL_SEATS || 10);
+const veto = Number(e.VAULT_VETO_THRESHOLD || 3);
+const admin = Number(e.VAULT_ADMIN_THRESHOLD || 6);
 const net = e.NEAR_NETWORK || "mainnet";
 const wasm = "contracts/vault/res/bagflip_vault.wasm";
 
 const problems: string[] = [];
 if (!e.TRADING_WALLET_ADDRESS) problems.push("TRADING_WALLET_ADDRESS is not set (it is recorded in the vault, publicly)");
-if (guardians.length < 3) problems.push("set at least 3 VAULT_GUARDIANS (independent community members)");
-if (threshold < 2 || threshold > guardians.length) problems.push("VAULT_GUARDIAN_THRESHOLD should be ≥2 and ≤ number of guardians");
-if (guardians.includes(operator)) problems.push("the operator cannot be a guardian");
-if (e.CREATOR_WALLET_ADDRESS && guardians.includes(e.CREATOR_WALLET_ADDRESS)) problems.push("avoid making the creator wallet a guardian (it weakens independence)");
+if (!token) problems.push("MEME_TOKEN_CONTRACT_ID is not set (deploy the vault after the token launches; council seats read its balances)");
+if (veto < 1 || veto > seats || admin < 1 || admin > seats) problems.push("thresholds must be between 1 and VAULT_COUNCIL_SEATS");
+if (!excluded.length) problems.push("EXCLUDED_HOLDER_ACCOUNTS is empty: list the liquidity pool / bridge accounts so they can never take council seats");
+if (e.CREATOR_WALLET_ADDRESS && !excluded.includes(e.CREATOR_WALLET_ADDRESS)) problems.push(`decide whether the creator wallet ${e.CREATOR_WALLET_ADDRESS} may hold a council seat (add it to EXCLUDED_HOLDER_ACCOUNTS if not)`);
 
 const args = {
   operator,
-  guardians,
-  guardian_threshold: threshold,
+  token: token || "<BAGFLIP_TOKEN_CONTRACT>",
+  excluded,
+  seats_max: seats,
+  min_seat_balance: parseUnits(e.VAULT_MIN_SEAT_BALANCE || "100000", decimals).toString(),
+  seat_min_age_sec: Math.round(Number(e.VAULT_SEAT_MIN_AGE_HOURS || 24) * 3600),
+  veto_threshold: veto,
+  admin_threshold: admin,
   wrap_near: net === "mainnet" ? "wrap.near" : "wrap.testnet",
   trading_recipient: e.TRADING_WALLET_ADDRESS || "<SOLANA_TRADING_WALLET>",
   daily_hunt_cap: parseUnits(e.VAULT_DAILY_HUNT_CAP_NEAR || "50", NEAR_DECIMALS).toString(),
@@ -39,7 +48,7 @@ const args = {
 const bytes = readFileSync(wasm);
 const codeHash = bs58.encode(createHash("sha256").update(bytes).digest());
 const json = JSON.stringify(args);
-const operatorMethods = "propose_mode, propose_distribution, fund_trading, claim_many, claim, unwrap, apply_pending_mode, pause";
+const operatorMethods = "propose_mode, propose_distribution, fund_trading, claim_many, claim, claim_seat, unwrap, apply_pending_mode, pause";
 
 console.log(`BAGFLIP vault plan (${net})
 wasm: ${wasm} (${bytes.length} bytes), expected on-chain code_hash: ${codeHash}
@@ -63,6 +72,9 @@ near account add-key ${operator} grant-function-call-access --allowance '2 NEAR'
 near account list-keys ${vault} network-config ${net} now
 near account delete-keys ${vault} public-keys <ed25519:...> network-config ${net} sign-with-keychain send
 
-6) Verify it is locked (0 access keys) and publish the account + code hash:
+6) Fill the Holder Council (the bot also does this every 6h; anyone can nominate):
+near contract call-function as-transaction ${vault} claim_seat json-args '{"candidate":"<top holder>","replace":null}' prepaid-gas '60.0 Tgas' attached-deposit '0 NEAR' sign-as ${operator} network-config ${net} sign-with-keychain send
+
+7) Verify it is locked (0 access keys) and publish the account + code hash:
 near account list-keys ${vault} network-config ${net} now
 `);

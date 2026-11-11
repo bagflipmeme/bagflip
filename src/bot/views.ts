@@ -183,6 +183,7 @@ export const HELP = (cfg: Config) =>
     "/pnl — trading performance",
     "/claim — collect your distribution rewards",
     "/disconnect &lt;account&gt; — unlink a wallet (revokes its vote)",
+    "/council — the top-holder council that can veto payout lists and pause the vault",
     "/disclosures — risks, custody and how voting works",
     "",
     `Voting power = ${esc(cfg.MEME_TOKEN_SYMBOL)} held by your verified wallets at the 00:00 MYT snapshot. The mode changes only when the other option has more than 50% of weighted votes and quorum is met.`,
@@ -192,7 +193,7 @@ export const DISCLOSURES = (cfg: Config) =>
   [
     "<b>BAGFLIP disclosures</b>",
     "• <b>Weighted voting.</b> One token = one vote, read on-chain at one NEAR block at 00:00 MYT. Large holders have proportionally more influence.",
-    `• <b>Custody.</b> The reward treasury ${esc(cfg.TREASURY_NEAR_ADDRESS || "(not configured)")} is a smart-contract vault with no keys: nobody, including the creator, can withdraw from it. Money leaves only as claims to accounts in a published payout list (after a guardian veto window) or as capped, time-locked transfers to the trading route. The bot still computes payout lists and holds the Solana trading key; guardians can veto or pause.`,
+    `• <b>Custody.</b> The reward treasury ${esc(cfg.TREASURY_NEAR_ADDRESS || "(not configured)")} is a smart-contract vault with no keys: nobody, including the creator, can withdraw from it. Money leaves only as claims to accounts in a published payout list (after a Holder Council veto window) or as capped, time-locked transfers to the trading route. The bot still computes payout lists and holds the Solana trading key; the Holder Council (the top token holders, decided on chain) can veto or pause.`,
     "• <b>Total-loss risk.</b> AUTO HUNT trades extremely speculative meme tokens. Rug pulls, failed exits, congestion and fees can destroy the entire trading capital. Stops and targets are best-effort, not guarantees. There is no promise of profit.",
     "• <b>Distributions</b> are paid only from funds actually recovered and reconciled. Unclaimed rewards stay reserved.",
     "• <b>No advice.</b> Nothing here is investment, legal or tax advice. Participation may have legal or tax consequences where you live.",

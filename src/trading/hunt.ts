@@ -3,9 +3,10 @@
  *   1. settle in-flight orders (always, any mode)
  *   2. mark + manage open positions with executable sell quotes (always) —
  *      in any mode other than AUTO HUNT this is the wind-down
- *   3. if new entries are allowed: scan → score → confirm → safety → size →
- *      round-trip quote check → open
- * Only one engine instance acts at a time (DB lease), and every effect goes
+ *   3. scan: discovery → snapshot → score → confirm → safety → size → round-trip quote → open,
+ *      with every candidate's fate recorded in a scanner funnel. Shadow comparison books (paper only)
+ *      evaluate the same snapshots with their own variant.
+ * Only one engine instance acts at a time (DB lease), and every real effect goes
  * through PositionManager's idempotent order flow.
  */
 import type { Db } from "../db/index.ts";
@@ -18,10 +19,12 @@ import type { MarketDataProvider, SafetyChecker, TokenMarket, DiscoveryEvent } f
 import type { ExecutionAdapter } from "../solana/execution/types.ts";
 import { PositionManager, type PositionRow } from "./positions.ts";
 import { canOpenPositions, getHealth, positionSize, type HealthState } from "./risk.ts";
-import { scoreToken, confirmEntry, decideExit, DEFAULT_PARAMS, type StrategyParams, type ExitParams } from "../strategy/strategy.ts";
+import { decideExit, type StrategyParams, type ExitParams } from "../strategy/strategy.ts";
 import { enqueue } from "../jobs/queue.ts";
 import { notify } from "../shared/outbox.ts";
 import type { VaultMode, VaultPort } from "../near/vault.ts";
+import { evaluateMarkets, newFunnel, vetEntry, bump, variantConfig, SignalTracker, type Funnel, type VariantConfig } from "./evaluate.ts";
+import type { ShadowBook } from "./shadow.ts";
 
 export interface HuntDeps {
   db: Db;
@@ -34,23 +37,15 @@ export interface HuntDeps {
   instanceId: string;
   /** Vault contract: new entries need AUTO_HUNT active there too (time-lock passed, not vetoed). */
   vault?: VaultPort;
+  /** Paper-only comparison books fed with the same snapshots. */
+  shadows?: ShadowBook[];
 }
 
 export function strategyParams(cfg: Config): StrategyParams {
-  return { ...DEFAULT_PARAMS, entryScore: cfg.ENTRY_SCORE_THRESHOLD };
+  return variantConfig(cfg, cfg.STRATEGY_VARIANT).params;
 }
 export function exitParams(cfg: Config): ExitParams {
-  return {
-    stopLossPct: cfg.STOP_LOSS_PERCENT,
-    takeProfitPct: cfg.TAKE_PROFIT_PERCENT,
-    takeProfitSellPct: cfg.TAKE_PROFIT_SELL_PERCENT,
-    trailingActivatePct: cfg.TRAILING_ACTIVATE_PERCENT,
-    trailingStopPct: cfg.TRAILING_STOP_PERCENT,
-    maxHoldHours: cfg.MAX_POSITION_HOLD_HOURS,
-    staleHours: cfg.STALE_EXIT_HOURS,
-    exitSlippageBps: cfg.EXIT_SLIPPAGE_BPS,
-    emergencySlippageBps: cfg.EMERGENCY_EXIT_SLIPPAGE_BPS,
-  };
+  return variantConfig(cfg, cfg.STRATEGY_VARIANT).exits;
 }
 
 export interface TickReport {
@@ -62,18 +57,35 @@ export interface TickReport {
   writeOffs: number;
 }
 
+type DiscoveryAware = MarketDataProvider & {
+  observe?: (m: TokenMarket) => void;
+  migratedAt?: (mint: string) => number | undefined;
+  stats?: () => { watchlist: number; newSinceLast: Record<string, number>; hotCurve: number; freshGraduates: number };
+  promote?: (mint: string) => void;
+};
+
 export class HuntEngine {
   readonly pm: PositionManager;
+  readonly vc: VariantConfig;
+  readonly tracker = new SignalTracker();
+  lastFunnel?: Funnel;
   private lastScan = 0;
   private lastPositionCheck = 0;
-  private signals = new Map<string, { score: number; priceNative: number; at: number }>();
   private discovery = new Map<string, DiscoveryEvent>();
-  private cooldown = new Map<string, number>();
 
   private d: HuntDeps;
   constructor(d: HuntDeps) {
     this.d = d;
+    this.vc = variantConfig(d.cfg, d.cfg.STRATEGY_VARIANT);
     this.pm = new PositionManager(d.db, d.clock, d.cfg, d.exec, d.log.child({ mod: "positions" }));
+  }
+
+  get shadows(): ShadowBook[] {
+    return this.d.shadows ?? [];
+  }
+
+  private get market(): DiscoveryAware {
+    return this.d.market as DiscoveryAware;
   }
 
   private vaultCache?: { at: number; mode: VaultMode | null; paused: boolean };
@@ -130,7 +142,7 @@ export class HuntEngine {
     }
     if (!hunting) await this.pm.cancelUnsentBuys(`mode is ${mode}`);
 
-    // 2. positions
+    // 2. positions (real + shadow)
     if (opts.force || now - this.lastPositionCheck >= this.d.cfg.POSITION_CHECK_INTERVAL_SECONDS * 1000) {
       this.lastPositionCheck = now;
       const r = await this.managePositions(hunting, now);
@@ -147,17 +159,15 @@ export class HuntEngine {
       }
     }
 
-    // 3. entries
+    // 3. scan + entries
     const verdict = await canOpenPositions(this.d.db, this.d.cfg, this.d.clock, this.d.exec.mode, await this.vaultMode());
     await this.recordStatus(verdict.ok ? "active" : "paused", verdict.reasons);
-    if (!verdict.ok) {
-      rep.paused = verdict.reasons;
-      return rep;
-    }
-    if (opts.force || now - this.lastScan >= this.d.cfg.SCAN_INTERVAL_SECONDS * 1000) {
+    if (!verdict.ok) rep.paused = verdict.reasons;
+    // Shadow books keep scanning while real entries are paused, so the comparison never stalls.
+    if ((verdict.ok || this.shadows.length) && (opts.force || now - this.lastScan >= this.d.cfg.SCAN_INTERVAL_SECONDS * 1000)) {
       this.lastScan = now;
       try {
-        const s = await this.scan(now);
+        const s = await this.scan(now, verdict.ok);
         rep.scanned = s.scanned;
         rep.entries = s.entries;
         await this.health((h) => (h.rpcFailures = 0));
@@ -175,7 +185,7 @@ export class HuntEngine {
 
   private async recordStatus(state: "active" | "paused", reasons: string[]) {
     const prev = await getState<{ state: string; reasons: string[] }>(this.d.db, "trading_status");
-    await setState(this.d.db, "trading_status", { state, reasons, at: this.d.clock.now().toISOString(), exec: this.d.exec.mode });
+    await setState(this.d.db, "trading_status", { state, reasons, at: this.d.clock.now().toISOString(), exec: this.d.exec.mode, variant: this.vc.name });
     const pausedBy = reasons.find((r) => /emergency|reconciled|RPC|not enabled/.test(r));
     if (state === "paused" && pausedBy && (prev?.state !== "paused" || !prev.reasons.includes(pausedBy))) {
       await notify(this.d.db, this.d.clock, `pause:${pausedBy}:${this.d.clock.now().toISOString().slice(0, 13)}`, "pause", `⏸️ <b>AUTO HUNT paused</b>: ${pausedBy}. Open positions are still managed; no new entries.`);
@@ -186,20 +196,31 @@ export class HuntEngine {
     let exits = 0;
     let writeOffs = 0;
     const open = (await this.pm.openPositions()).filter((p) => p.status === "open");
-    if (!open.length) return { exits, writeOffs };
+    const shadowMints = this.shadows.flatMap((s) => [...s.positions.keys()]);
+    const mints = [...new Set([...open.map((p) => p.mint), ...shadowMints])];
+    if (!mints.length) return { exits, writeOffs };
     let markets = new Map<string, TokenMarket>();
     try {
-      markets = new Map((await this.d.market.snapshot(open.map((p) => p.mint))).map((m) => [m.mint, m]));
+      markets = new Map((await this.d.market.snapshot(mints)).map((m) => [m.mint, m]));
       // Record held-token observations too, so replays can evaluate exits.
       for (const m of markets.values()) {
+        if (!open.some((p) => p.mint === m.mint)) continue;
         await this.d.db.query("INSERT INTO market_observations(mint, observed_at, source, data, decision) VALUES ($1,$2,$3,$4::jsonb,'position')", [m.mint, new Date(now).toISOString(), this.d.market.name, JSON.stringify(m)]);
       }
     } catch (e) {
       this.d.log.warn("market snapshot for positions failed", { error: String(e) });
     }
+    for (const s of this.shadows) {
+      try {
+        await s.manage(now, markets);
+      } catch (e) {
+        this.d.log.warn("shadow manage failed", { variant: s.vc.name, error: String(e) });
+      }
+    }
+    if (!open.length) return { exits, writeOffs };
     const decision = await currentDecision(this.d.db);
     const windDownDeadline = decision && !hunting ? new Date(decision.executed_at).getTime() + this.d.cfg.WINDDOWN_MAX_HOURS * 3_600_000 : null;
-    const ep = exitParams(this.d.cfg);
+    const ep = this.vc.exits;
 
     for (const p of open) {
       let value: bigint | null = null;
@@ -237,7 +258,7 @@ export class HuntEngine {
         } catch (e) {
           await this.rpcFailure(e, "exit");
         }
-        if (dec.fractionBps >= 10_000) this.cooldown.set(p.mint, now + this.d.cfg.REENTRY_COOLDOWN_HOURS * 3_600_000);
+        if (dec.fractionBps >= 10_000) this.tracker.cooldown.set(p.mint, now + this.d.cfg.REENTRY_COOLDOWN_HOURS * 3_600_000);
       } else if (value === null) {
         await this.d.db.query("UPDATE trading_positions SET exit_attempts = exit_attempts + 1 WHERE id=$1", [p.id]);
       }
@@ -245,91 +266,100 @@ export class HuntEngine {
     return { exits, writeOffs };
   }
 
-  private async scan(now: number): Promise<{ scanned: number; entries: number }> {
+  private async scan(now: number, entriesAllowed: boolean): Promise<{ scanned: number; entries: number }> {
     const cands = await this.d.market.candidates(now);
-    for (const c of cands) if (!this.discovery.has(c.mint)) this.discovery.set(c.mint, c);
-    if (!cands.length) return { scanned: 0, entries: 0 };
-    const markets = await this.d.market.snapshot(cands.map((c) => c.mint));
-    const open = await this.pm.openPositions();
-    const held = new Set(open.map((p) => p.mint));
-    const params = strategyParams(this.d.cfg);
-    let entries = 0;
-    const ranked: { m: TokenMarket; s: ReturnType<typeof scoreToken> }[] = [];
+    for (const c of cands) this.discovery.set(c.mint, { ...(this.discovery.get(c.mint) ?? {}), ...c });
+    const discStats = this.market.stats?.() ?? null;
+    const markets = cands.length ? await this.d.market.snapshot(cands.map((c) => c.mint)) : [];
+    for (const m of markets) this.market.observe?.(m);
+    const migratedAt = (mint: string) => this.market.migratedAt?.(mint);
+    const discovery = discStats ? { watchlist: discStats.watchlist, newSinceLast: discStats.newSinceLast, hotCurve: discStats.hotCurve, freshGraduates: discStats.freshGraduates } : null;
 
+    // Shadow variants judge the very same snapshots.
+    for (const s of this.shadows) {
+      try {
+        await s.onScan(markets, now, { candidates: cands.length, discovery, migratedAt, disc: this.discovery });
+      } catch (e) {
+        this.d.log.warn("shadow scan failed", { variant: s.vc.name, error: String(e) });
+      }
+    }
+    if (!entriesAllowed) return { scanned: markets.length, entries: 0 };
+
+    const f = newFunnel(this.vc.name, new Date(now));
+    f.discovery = discovery;
+    f.candidates = cands.length;
+    f.snapshots = markets.length;
+    f.noPair = Math.max(0, cands.length - markets.length);
+    const open = await this.pm.openPositions();
+    const { ranked, scoresByMint } = evaluateMarkets(markets, now, this.vc, this.tracker, new Set(open.map((p) => p.mint)), migratedAt, f);
+
+    // Keep interesting tokens on the watchlist; drop ones that can never qualify.
     for (const m of markets) {
-      const s = scoreToken(m, now, params);
-      if (s.score >= params.entryScore * 0.8 || s.pass) {
+      const s = scoresByMint.get(m.mint)!;
+      if (s.score >= this.vc.params.entryScore * 0.8 || s.pass) {
         await this.d.db.query(
           "INSERT INTO market_observations(mint, observed_at, source, data, score, decision, reasons) VALUES ($1,$2,$3,$4::jsonb,$5,$6,$7::jsonb)",
           [m.mint, new Date(now).toISOString(), this.d.market.name, JSON.stringify(m), s.score, s.pass ? "signal" : "watch", JSON.stringify({ rejects: s.rejects, notes: s.notes, components: s.components })],
         );
-        (this.d.market as { promote?: (m: string) => void }).promote?.(m.mint);
+        this.market.promote?.(m.mint);
       } else if (s.rejects.some((r) => /too old|no SOL price|venue/.test(r))) {
         this.d.market.drop(m.mint);
       }
-      const prev = this.signals.get(m.mint);
-      const cur = { score: s.score, priceNative: m.priceNative ?? 0, at: now };
-      if (s.pass) {
-        const conf = confirmEntry(prev, cur, params.entryScore);
-        this.signals.set(m.mint, cur);
-        if (conf.confirmed && !held.has(m.mint) && (this.cooldown.get(m.mint) ?? 0) < now) ranked.push({ m, s });
-      } else this.signals.delete(m.mint);
     }
 
-    ranked.sort((a, b) => b.s.score - a.s.score);
-    for (const { m, s } of ranked.slice(0, 1)) {
+    let entries = 0;
+    let openCount = open.length;
+    for (const { m, s, why } of ranked) {
       const pending = await this.pm.pendingBuyLamports();
-      const { size, why } = await positionSize(this.d.db, this.d.cfg, open.length, pending);
+      const { size, why: sizeWhy } = await positionSize(this.d.db, this.d.cfg, openCount, pending);
       if (size === 0n) {
-        this.d.log.info("entry skipped", { mint: m.mint, why });
-        break;
+        bump(f.sizingSkipped, sizeWhy);
+        continue;
       }
       const disc = this.discovery.get(m.mint);
-      const safety = await this.d.safety.check(m, disc?.creator, disc?.bondingCurve);
-      if (!safety.ok) {
-        this.d.log.info("entry rejected by safety", { mint: m.mint, reasons: safety.reasons });
-        this.cooldown.set(m.mint, now + 3_600_000);
+      let v;
+      try {
+        v = await vetEntry(m, size, this.vc, { safety: this.d.safety, quoteBuy: (a, b) => this.d.exec.quoteBuy(a, b), quoteSell: (a, b) => this.d.exec.quoteSell(a, b) }, disc, f);
+      } catch (e) {
+        bump(f.quoteRejected, `API error: ${String(e instanceof Error ? e.message : e).slice(0, 60)}`);
         continue;
       }
-      // Executable round trip: can we buy at acceptable impact AND sell back right now?
-      const buyQ = await this.d.exec.quoteBuy(m.mint, size);
-      if (!buyQ) continue;
-      if (buyQ.priceImpactPct > this.d.cfg.MAX_PRICE_IMPACT_PERCENT) {
-        this.d.log.info("entry rejected: price impact", { mint: m.mint, impact: buyQ.priceImpactPct });
-        continue;
-      }
-      const sellQ = await this.d.exec.quoteSell(m.mint, buyQ.outAmount);
-      if (!sellQ) {
-        this.d.log.info("entry rejected: no sell route (possible honeypot)", { mint: m.mint });
-        this.cooldown.set(m.mint, now + 6 * 3_600_000);
-        continue;
-      }
-      const roundTripLossPct = (1 - Number(sellQ.outAmount) / Number(size)) * 100;
-      if (roundTripLossPct > this.d.cfg.MAX_ROUNDTRIP_COST_PERCENT) {
-        this.d.log.info("entry rejected: round-trip cost", { mint: m.mint, roundTripLossPct });
+      if (!v.ok) {
+        this.tracker.cooldown.set(m.mint, now + v.cooldownMs);
+        this.d.log.info("entry rejected", { mint: m.mint, stage: v.stage, reason: v.reason });
         continue;
       }
       const signals = {
+        variant: this.vc.name,
         score: s.score,
+        why,
         components: s.components,
         notes: s.notes,
-        safety: safety.facts,
-        roundTripLossPct,
-        priceImpactPct: buyQ.priceImpactPct,
+        safety: v.safety,
+        roundTripLossPct: v.roundTripLossPct,
+        priceImpactPct: v.buyQ.priceImpactPct,
         volumeM5: m.volume.m5,
         liquidityUsd: m.liquidityUsd,
         marketCapUsd: m.marketCapUsd,
         dexId: m.dexId,
+        graduateAgeMin: s.graduateAgeMin,
         discovery: disc?.source,
       };
       const pid = await this.pm.open(m, size, s.score, signals);
-      if (pid) {
-        const st = await this.d.db.query<{ status: string }>("SELECT status FROM trading_positions WHERE id=$1", [pid]);
+      if (!pid) continue;
+      const st = await this.d.db.query<{ status: string; exit_reason: string | null }>("SELECT status, exit_reason FROM trading_positions WHERE id=$1", [pid]);
+      if (st.rows[0]?.status === "failed") {
         // A failed entry puts the token on cooldown so the engine does not burn fees retrying it.
-        if (st.rows[0]?.status === "failed") this.cooldown.set(m.mint, now + 3_600_000);
-        else entries++;
+        bump(f.entryFailed, st.rows[0].exit_reason ?? "entry failed");
+        this.tracker.cooldown.set(m.mint, now + 3_600_000);
+      } else {
+        entries++;
+        openCount++;
+        f.executed++;
       }
     }
+    this.lastFunnel = f;
+    await this.d.db.query("INSERT INTO scan_funnel(at, variant, data) VALUES ($1,$2,$3::jsonb)", [f.at, f.variant, JSON.stringify(f)]);
     return { scanned: markets.length, entries };
   }
 }

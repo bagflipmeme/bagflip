@@ -107,9 +107,9 @@ export async function runDistribution(d: DistDeps): Promise<DistResult> {
       d.clock,
       `claimable:${eventId}`,
       "claimable",
-      `💰 <b>Rewards are claimable</b>\n${formatAsset(a.allocated, "NEAR")} (${formatUsd(toUsdMicro(a.allocated, "NEAR", price))}) split pro-rata across ${a.allocations.length} holders (snapshot block ${block.height}).\nClaims open on the vault after the guardian veto window. DM the bot /claim to queue yours.`,
+      `💰 <b>Rewards are claimable</b>\n${formatAsset(a.allocated, "NEAR")} (${formatUsd(toUsdMicro(a.allocated, "NEAR", price))}) split pro-rata across ${a.allocations.length} holders (snapshot block ${block.height}).\nClaims open on the vault after the Holder Council veto window. DM the bot /claim to queue yours.`,
     );
-    // Publish it as an on-chain Merkle payout list (time-locked, guardian-vetoable).
+    // Publish it as an on-chain Merkle payout list (time-locked, council-vetoable).
     await enqueue(tx, d.clock, { type: "vault.propose_distribution", key: `vault-dist:${eventId}`, payload: { eventId }, maxAttempts: 500 });
     return eventId;
   });

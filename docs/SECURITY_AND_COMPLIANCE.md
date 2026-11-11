@@ -5,8 +5,8 @@
 | Role | Chain | What BAGFLIP may do with it |
 |---|---|---|
 | **Creator wallet** (`CREATOR_WALLET_ADDRESS`) | NEAR | Nothing. No key is configured. It is only the default *allowed deposit sender*; transfers from it into the treasury are credited. It is never read for funds, swept or signed for. |
-| **BAGFLIP vault** (`TREASURY_NEAR_ADDRESS`, e.g. `bagflip.near`) | NEAR | A smart contract with **all keys deleted** ([docs/VAULT.md](VAULT.md)). Nobody can sign for it. Funds leave only as claims to accounts in a time-locked, guardian-vetoable Merkle payout list, or as `fund_trading` transfers (AUTO_HUNT only, time-locked, rolling 24h cap). |
-| **Operator** (`OPERATOR_ACCOUNT_ID`) | NEAR | The bot's account. Its function-call key can only call vault operator methods; it can't withdraw or redirect funds. Guardians can rotate it. |
+| **BAGFLIP vault** (`TREASURY_NEAR_ADDRESS`, e.g. `bagflip.near`) | NEAR | A smart contract with **all keys deleted** ([docs/VAULT.md](VAULT.md)). Nobody can sign for it. Funds leave only as claims to accounts in a time-locked Merkle payout list the Holder Council (top 10 holders) can veto, or as `fund_trading` transfers (AUTO_HUNT only, time-locked, rolling 24h cap). |
+| **Operator** (`OPERATOR_ACCOUNT_ID`) | NEAR | The bot's account. Its function-call key can only call vault operator methods; it can't withdraw or redirect funds. The Holder Council can rotate it (6 of 10 seats plus a 48h delay). |
 | **Trading wallet** (`TRADING_WALLET_ADDRESS`) | Solana | Dedicated hot wallet. It holds only SOL bridged in from the treasury. It signs swaps, token-account closes and SOL deposits back to 1Click. |
 
 The boundary is enforced in the ledger, not just by convention:
@@ -131,7 +131,7 @@ public, get advice on at least these questions:
 These are in `/disclosures` and summarised in `/start` and `/help`:
 
 * Voting is weighted by holdings.
-* The treasury is a keyless vault contract, with time locks and guardian vetoes.
+* The treasury is a keyless vault contract, with time locks and vetoes by the top-10-holder council.
 * The operator still computes payout lists and holds the Solana trading key.
 * Trading capital can be lost entirely.
 * Stops are best-effort.

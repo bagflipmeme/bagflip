@@ -1,7 +1,7 @@
 //! BAGFLIP vault — the community reward treasury, deployed to the treasury account (e.g. `bagflip.near`)
 //! and then LOCKED by deleting every full-access key. After that nobody — not the creator, not the
-//! operator, not the guardians — can sign arbitrary transactions for this account, and the code can
-//! never be replaced (there is no upgrade method).
+//! operator, not the Holder Council — can sign arbitrary transactions for this account, and the code
+//! can never be replaced (there is no upgrade method).
 //!
 //! Funds can leave in exactly two ways:
 //!  1. `claim` / `claim_many`: pays the account named in a published Merkle payout list, up to that
@@ -11,18 +11,22 @@
 //!
 //! Roles:
 //!  - operator (the BAGFLIP bot): proposes daily modes and payout lists, requests capped trading
-//!    transfers, relays claims. It cannot withdraw or redirect anything.
-//!  - guardians (community members): any ONE guardian can veto a pending payout list or a pending
-//!    AUTO_HUNT activation and can pause; changes to roles/caps and unpausing need `guardian_threshold`
-//!    approvals plus (except unpause) the admin delay.
-//!  - anyone: claims (always paid to the account in the leaf), applying a matured mode, unwrapping wNEAR.
+//!    transfers, relays claims, can pause. It cannot withdraw or redirect anything.
+//!  - Holder Council: up to `seats_max` (10) seats held by the largest BAGFLIP holders. Seats are
+//!    contested ON CHAIN: anyone may nominate an account; the contract reads both balances from the
+//!    token contract (`ft_balance_of`) and the larger holder takes the seat. A seat can vote only after
+//!    `seat_min_age` (no buy-and-vote). `veto_threshold` seats can veto a pending payout list or AUTO_HUNT
+//!    activation, or pause; `admin_threshold` seats (+ admin delay) change the operator/cap/exclusions,
+//!    revoke an active list, or unpause. Thresholds scale down to the number of eligible seats.
+//!  - anyone: claims (always paid to the account in the leaf), seat challenges, applying a matured mode,
+//!    unwrapping wNEAR, executing approved admin actions.
 //!
 //! Risk asymmetry: changes that REDUCE risk (switching to DISTRIBUTE/INACTIVE, pausing, vetoing) take
 //! effect immediately; changes that INCREASE risk (activating AUTO_HUNT, new payout lists, admin
-//! changes) are time-locked so the community can inspect them first.
+//! changes) are time-locked so holders can inspect them first.
 //!
 //! What the contract cannot verify (documented, bounded): the off-chain snapshot behind a payout list
-//! (guardians check the published list against `data_hash` during the veto window), and the Solana
+//! (the council checks the published list against `data_hash` during the veto window), and the Solana
 //! recipient behind a 1Click deposit address (bounded by the daily cap; every transfer is logged with
 //! its quote reference so anyone can check it on the 1Click status API).
 
@@ -32,21 +36,28 @@ use near_sdk::store::{LookupMap, LookupSet};
 use near_sdk::{env, ext_contract, near, require, AccountId, Gas, NearToken, PanicOnDefault, Promise, PromiseError};
 
 pub const EVENT_STANDARD: &str = "bagflip_vault";
-pub const EVENT_VERSION: &str = "1.0.0";
+pub const EVENT_VERSION: &str = "1.1.0";
 pub const DAY_NS: u64 = 86_400 * 1_000_000_000;
 /// NEP-145 registration of a fresh 1Click deposit address on wrap.near.
 pub const WRAP_STORAGE_DEPOSIT: u128 = 1_250_000_000_000_000_000_000;
 pub const MAX_CLAIMS_PER_CALL: usize = 20;
 pub const MAX_PROOF_LEN: usize = 40;
-pub const MAX_GUARDIANS: usize = 15;
+pub const MAX_SEATS: u8 = 20;
+pub const MAX_EXCLUDED: usize = 30;
 
 const G_WRAP_CALL: Gas = Gas::from_tgas(10);
 const G_FT_TRANSFER: Gas = Gas::from_tgas(15);
 const G_CALLBACK: Gas = Gas::from_tgas(15);
+const G_VIEW: Gas = Gas::from_tgas(10);
 
 #[ext_contract(ext_wrap)]
 pub trait ExtWrap {
     fn near_withdraw(&mut self, amount: U128);
+}
+
+#[ext_contract(ext_ft)]
+pub trait ExtFt {
+    fn ft_balance_of(&self, account_id: AccountId) -> U128;
 }
 
 #[near(serializers = [json, borsh])]
@@ -61,8 +72,15 @@ pub enum Mode {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     pub operator: AccountId,
-    pub guardians: Vec<AccountId>,
-    pub guardian_threshold: u8,
+    /// The BAGFLIP token whose balances decide council seats.
+    pub token: AccountId,
+    /// Accounts that can never hold a seat (pools, bridges, contracts). Vault, token and operator are always excluded.
+    pub excluded: Vec<AccountId>,
+    pub seats_max: u8,
+    pub min_seat_balance: U128,
+    pub seat_min_age_ns: U64,
+    pub veto_threshold: u8,
+    pub admin_threshold: u8,
     pub wrap_near: AccountId,
     /// The public Solana trading wallet (informational: the contract cannot verify 1Click recipients).
     pub trading_recipient: String,
@@ -72,6 +90,15 @@ pub struct Config {
     pub admin_delay_ns: U64,
     /// NEAR always kept on top of storage cost.
     pub reserve: U128,
+}
+
+#[near(serializers = [json, borsh])]
+#[derive(Clone, Debug, PartialEq)]
+pub struct Seat {
+    pub account_id: AccountId,
+    /// Balance verified on chain when the seat was won.
+    pub balance: U128,
+    pub since_ns: U64,
 }
 
 #[near(serializers = [json, borsh])]
@@ -113,8 +140,8 @@ pub struct HuntTransfer {
 #[derive(Clone, Debug, PartialEq)]
 pub enum AdminAction {
     SetOperator { operator: AccountId },
-    SetGuardians { guardians: Vec<AccountId>, threshold: u8 },
     SetDailyHuntCap { cap: U128 },
+    SetExcluded { accounts: Vec<AccountId> },
     /// Cancel the unclaimed remainder of an already-active payout list (e.g. found to be wrong).
     RevokeDistribution { epoch: u64 },
     Unpause,
@@ -153,6 +180,10 @@ pub struct Status {
     pub last_epoch: u64,
     pub hunt_transfers: u64,
     pub admin_proposals: u64,
+    pub seats_filled: u8,
+    pub eligible_seats: u8,
+    pub veto_votes_required: u8,
+    pub admin_votes_required: u8,
     pub version: String,
 }
 
@@ -161,6 +192,7 @@ pub struct Status {
 pub struct Vault {
     config: Config,
     paused: bool,
+    pause_round: u64,
     mode: Mode,
     mode_cycle: String,
     pending_mode: Option<PendingMode>,
@@ -173,6 +205,9 @@ pub struct Vault {
     hunt_count: u64,
     admin: LookupMap<u64, AdminProposal>,
     admin_count: u64,
+    seats: Vec<Seat>,
+    /// council votes keyed "dist:<epoch>", "mode:<cycle>", "pause:<round>"
+    votes: LookupMap<String, Vec<AccountId>>,
 }
 
 fn emit(event: &str, data: Value) {
@@ -223,13 +258,11 @@ pub fn verify_proof(root: &[u8; 32], leaf: [u8; 32], proof: &[String]) -> bool {
     &h == root
 }
 
-fn validate_guardians(guardians: &[AccountId], threshold: u8) {
-    require!(!guardians.is_empty() && guardians.len() <= MAX_GUARDIANS, "1..=15 guardians required");
-    require!(threshold >= 1 && (threshold as usize) <= guardians.len(), "invalid guardian threshold");
-    let mut g = guardians.to_vec();
-    g.sort();
-    g.dedup();
-    require!(g.len() == guardians.len(), "duplicate guardian");
+fn validate_council(seats_max: u8, veto: u8, admin: u8, excluded: &[AccountId]) {
+    require!(seats_max >= 1 && seats_max <= MAX_SEATS, "seats_max must be 1..=20");
+    require!(veto >= 1 && veto <= seats_max, "invalid veto threshold");
+    require!(admin >= 1 && admin <= seats_max, "invalid admin threshold");
+    require!(excluded.len() <= MAX_EXCLUDED, "too many excluded accounts");
 }
 
 #[near]
@@ -238,8 +271,13 @@ impl Vault {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         operator: AccountId,
-        guardians: Vec<AccountId>,
-        guardian_threshold: u8,
+        token: AccountId,
+        excluded: Vec<AccountId>,
+        seats_max: u8,
+        min_seat_balance: U128,
+        seat_min_age_sec: u64,
+        veto_threshold: u8,
+        admin_threshold: u8,
         wrap_near: AccountId,
         trading_recipient: String,
         daily_hunt_cap: U128,
@@ -248,15 +286,20 @@ impl Vault {
         admin_delay_sec: u64,
         reserve: U128,
     ) -> Self {
-        validate_guardians(&guardians, guardian_threshold);
-        require!(!guardians.contains(&operator), "operator cannot be a guardian");
+        validate_council(seats_max, veto_threshold, admin_threshold, &excluded);
         require!(!trading_recipient.is_empty(), "trading recipient required");
+        require!(min_seat_balance.0 > 0, "min_seat_balance must be positive");
         let s = 1_000_000_000u64;
         Self {
             config: Config {
                 operator,
-                guardians,
-                guardian_threshold,
+                token,
+                excluded,
+                seats_max,
+                min_seat_balance,
+                seat_min_age_ns: U64(seat_min_age_sec * s),
+                veto_threshold,
+                admin_threshold,
                 wrap_near,
                 trading_recipient,
                 daily_hunt_cap,
@@ -266,6 +309,7 @@ impl Vault {
                 reserve,
             },
             paused: false,
+            pause_round: 0,
             mode: Mode::Inactive,
             mode_cycle: String::new(),
             pending_mode: None,
@@ -278,6 +322,8 @@ impl Vault {
             hunt_count: 0,
             admin: LookupMap::new(b"a"),
             admin_count: 0,
+            seats: Vec::new(),
+            votes: LookupMap::new(b"v"),
         }
     }
 
@@ -285,6 +331,10 @@ impl Vault {
 
     pub fn get_config(&self) -> Config {
         self.config.clone()
+    }
+
+    pub fn get_seats(&self) -> Vec<Seat> {
+        self.seats.clone()
     }
 
     pub fn get_status(&self) -> Status {
@@ -302,6 +352,10 @@ impl Vault {
             last_epoch: self.last_epoch,
             hunt_transfers: self.hunt_count,
             admin_proposals: self.admin_count,
+            seats_filled: self.seats.len() as u8,
+            eligible_seats: self.eligible_count() as u8,
+            veto_votes_required: self.required(self.config.veto_threshold) as u8,
+            admin_votes_required: self.required(self.config.admin_threshold) as u8,
             version: EVENT_VERSION.to_string(),
         }
     }
@@ -320,6 +374,10 @@ impl Vault {
 
     pub fn get_admin_proposal(&self, id: u64) -> Option<AdminProposal> {
         self.admin.get(&id).cloned()
+    }
+
+    pub fn get_votes(&self, key: String) -> Vec<AccountId> {
+        self.votes.get(&key).cloned().unwrap_or_default()
     }
 
     /// Helper so anyone can check a payout-list leaf against the on-chain hashing rules.
@@ -360,18 +418,128 @@ impl Vault {
         require!(env::predecessor_account_id() == self.config.operator, "only the operator");
     }
 
-    fn assert_guardian(&self) {
-        require!(self.config.guardians.contains(&env::predecessor_account_id()), "only a guardian");
-    }
-
     fn assert_not_paused(&self) {
         require!(!self.paused, "vault is paused");
+    }
+
+    fn is_excluded(&self, a: &AccountId) -> bool {
+        a == &env::current_account_id() || a == &self.config.token || a == &self.config.operator || a == &self.config.wrap_near || self.config.excluded.contains(a)
+    }
+
+    fn seat_of(&self, a: &AccountId) -> Option<&Seat> {
+        self.seats.iter().find(|s| &s.account_id == a)
+    }
+
+    /// A seat votes only after holding it for `seat_min_age` (no buy-and-vote).
+    fn is_eligible(&self, a: &AccountId) -> bool {
+        self.seat_of(a).map(|s| env::block_timestamp().saturating_sub(s.since_ns.0) >= self.config.seat_min_age_ns.0).unwrap_or(false)
+    }
+
+    fn eligible_count(&self) -> usize {
+        self.seats.iter().filter(|s| self.is_eligible(&s.account_id)).count()
+    }
+
+    /// Votes required: the configured threshold, scaled down to the eligible seats (min 1) so the vault can never deadlock.
+    fn required(&self, threshold: u8) -> usize {
+        (threshold as usize).min(self.eligible_count()).max(1)
+    }
+
+    fn count(&self, voters: &[AccountId]) -> usize {
+        voters.iter().filter(|a| self.is_eligible(a)).count()
+    }
+
+    fn assert_council(&self) {
+        require!(self.is_eligible(&env::predecessor_account_id()), "only an eligible Holder Council seat");
+    }
+
+    /// Record the caller's vote under `key`; returns true once the veto threshold is met.
+    fn council_vote(&mut self, key: String) -> bool {
+        self.assert_council();
+        let me = env::predecessor_account_id();
+        let mut v = self.votes.get(&key).cloned().unwrap_or_default();
+        if !v.contains(&me) {
+            v.push(me);
+        }
+        let reached = self.count(&v) >= self.required(self.config.veto_threshold);
+        emit("council_vote", json!({ "key": key, "voters": v, "required": self.required(self.config.veto_threshold) }));
+        self.votes.insert(key, v);
+        reached
+    }
+
+    // ───────────── Holder Council seats (anyone can call) ─────────────
+
+    /// Nominate `candidate` for a seat. If the council is not full, the candidate joins when its on-chain
+    /// balance is at least `min_seat_balance`. If it is full, name the seat to contest with `replace`:
+    /// the candidate takes it only if its CURRENT balance is larger than that seat holder's current balance.
+    pub fn claim_seat(&mut self, candidate: AccountId, replace: Option<AccountId>) -> Promise {
+        require!(!self.is_excluded(&candidate), "this account cannot hold a seat");
+        require!(self.seat_of(&candidate).is_none(), "already seated");
+        let me = env::current_account_id();
+        match replace {
+            None => {
+                require!(self.seats.len() < self.config.seats_max as usize, "council is full: name a seat to contest");
+                ext_ft::ext(self.config.token.clone())
+                    .with_static_gas(G_VIEW)
+                    .ft_balance_of(candidate.clone())
+                    .then(Self::ext(me).with_static_gas(G_CALLBACK).on_seat_add(candidate))
+            }
+            Some(target) => {
+                require!(self.seat_of(&target).is_some(), "that account does not hold a seat");
+                ext_ft::ext(self.config.token.clone())
+                    .with_static_gas(G_VIEW)
+                    .ft_balance_of(candidate.clone())
+                    .and(ext_ft::ext(self.config.token.clone()).with_static_gas(G_VIEW).ft_balance_of(target.clone()))
+                    .then(Self::ext(me).with_static_gas(G_CALLBACK).on_seat_replace(candidate, target))
+            }
+        }
+    }
+
+    #[private]
+    pub fn on_seat_add(&mut self, candidate: AccountId, #[callback_result] balance: Result<U128, PromiseError>) -> bool {
+        let bal = match balance {
+            Ok(b) => b.0,
+            Err(_) => return false,
+        };
+        if bal < self.config.min_seat_balance.0 || self.seat_of(&candidate).is_some() || self.seats.len() >= self.config.seats_max as usize || self.is_excluded(&candidate) {
+            emit("seat_rejected", json!({ "candidate": candidate, "balance": U128(bal) }));
+            return false;
+        }
+        let s = Seat { account_id: candidate, balance: U128(bal), since_ns: U64(env::block_timestamp()) };
+        emit("seat_won", json!(s));
+        self.seats.push(s);
+        true
+    }
+
+    #[private]
+    pub fn on_seat_replace(
+        &mut self,
+        candidate: AccountId,
+        target: AccountId,
+        #[callback_result] candidate_balance: Result<U128, PromiseError>,
+        #[callback_result] target_balance: Result<U128, PromiseError>,
+    ) -> bool {
+        let (cb, tb) = match (candidate_balance, target_balance) {
+            (Ok(c), Ok(t)) => (c.0, t.0),
+            _ => return false,
+        };
+        let idx = match self.seats.iter().position(|s| s.account_id == target) {
+            Some(i) => i,
+            None => return false,
+        };
+        if cb <= tb || cb < self.config.min_seat_balance.0 || self.seat_of(&candidate).is_some() || self.is_excluded(&candidate) {
+            emit("seat_rejected", json!({ "candidate": candidate, "balance": U128(cb), "target": target, "target_balance": U128(tb) }));
+            return false;
+        }
+        let s = Seat { account_id: candidate, balance: U128(cb), since_ns: U64(env::block_timestamp()) };
+        emit("seat_won", json!({ "seat": s, "replaced": target, "replaced_balance": U128(tb) }));
+        self.seats[idx] = s;
+        true
     }
 
     // ───────────── operator: governance mode ─────────────
 
     /// Record the daily decision. DISTRIBUTE / INACTIVE take effect at once (risk-reducing);
-    /// AUTO_HUNT activation waits `mode_delay` so guardians can veto it.
+    /// AUTO_HUNT activation waits `mode_delay` so the council can veto it.
     pub fn propose_mode(&mut self, cycle_id: String, mode: Mode, snapshot_hash: String) {
         self.assert_operator();
         unhex32(&snapshot_hash);
@@ -545,45 +713,52 @@ impl Vault {
         false
     }
 
-    // ───────────── guardians ─────────────
+    // ───────────── Holder Council actions ─────────────
 
-    /// Any single guardian can veto a payout list before it activates. Its funds become unreserved.
-    pub fn veto_distribution(&mut self, epoch: u64, reason: String) {
-        self.assert_guardian();
-        let mut d = self.distributions.get(&epoch).cloned().unwrap_or_else(|| env::panic_str("unknown epoch"));
+    /// Vote to veto a payout list before it activates. At `veto_threshold` votes its funds become unreserved.
+    pub fn veto_distribution(&mut self, epoch: u64, reason: String) -> bool {
+        let d = self.distributions.get(&epoch).cloned().unwrap_or_else(|| env::panic_str("unknown epoch"));
         require!(!d.vetoed, "already vetoed");
         require!(env::block_timestamp() < d.activates_ns.0, "veto window closed; use RevokeDistribution");
+        if !self.council_vote(format!("dist:{}", epoch)) {
+            return false;
+        }
+        let mut d = d;
         d.vetoed = true;
         self.reserved -= d.total.0 - d.claimed.0;
-        emit("distribution_vetoed", json!({ "epoch": epoch, "by": env::predecessor_account_id(), "reason": reason }));
+        emit("distribution_vetoed", json!({ "epoch": epoch, "reason": reason }));
         self.distributions.insert(epoch, d);
+        true
     }
 
-    /// Any single guardian can veto a pending AUTO_HUNT activation.
-    pub fn veto_mode(&mut self, reason: String) {
-        self.assert_guardian();
+    /// Vote to veto a pending AUTO_HUNT activation.
+    pub fn veto_mode(&mut self, reason: String) -> bool {
         let p = self.pending_mode.clone().unwrap_or_else(|| env::panic_str("no pending mode"));
         require!(env::block_timestamp() < p.eta_ns.0, "veto window closed");
+        if !self.council_vote(format!("mode:{}", p.cycle_id)) {
+            return false;
+        }
         self.pending_mode = None;
-        emit("mode_vetoed", json!({ "cycle_id": p.cycle_id, "by": env::predecessor_account_id(), "reason": reason }));
+        emit("mode_vetoed", json!({ "cycle_id": p.cycle_id, "reason": reason }));
+        true
     }
 
-    /// Any guardian (or the operator) can pause: no claims, no new lists, no trading transfers.
-    pub fn pause(&mut self, reason: String) {
-        let p = env::predecessor_account_id();
-        require!(self.config.guardians.contains(&p) || p == self.config.operator, "only a guardian or the operator");
+    /// The operator pauses immediately; council seats pause at `veto_threshold` votes.
+    /// While paused: no claims, no new payout lists, no trading transfers.
+    pub fn pause(&mut self, reason: String) -> bool {
+        if env::predecessor_account_id() != self.config.operator && !self.council_vote(format!("pause:{}", self.pause_round)) {
+            return false;
+        }
         self.paused = true;
-        emit("paused", json!({ "by": p, "reason": reason }));
+        emit("paused", json!({ "by": env::predecessor_account_id(), "reason": reason }));
+        true
     }
 
     pub fn propose_admin(&mut self, action: AdminAction) -> u64 {
-        self.assert_guardian();
+        self.assert_council();
         match &action {
-            AdminAction::SetGuardians { guardians, threshold } => {
-                validate_guardians(guardians, *threshold);
-                require!(!guardians.contains(&self.config.operator), "operator cannot be a guardian");
-            }
-            AdminAction::SetOperator { operator } => require!(!self.config.guardians.contains(operator), "operator cannot be a guardian"),
+            AdminAction::SetOperator { operator } => require!(self.seat_of(operator).is_none(), "operator cannot hold a seat"),
+            AdminAction::SetExcluded { accounts } => require!(accounts.len() <= MAX_EXCLUDED, "too many excluded accounts"),
             AdminAction::RevokeDistribution { epoch } => require!(self.distributions.get(epoch).is_some(), "unknown epoch"),
             _ => {}
         }
@@ -597,7 +772,7 @@ impl Vault {
     }
 
     pub fn approve_admin(&mut self, id: u64) {
-        self.assert_guardian();
+        self.assert_council();
         let mut p = self.admin.get(&id).cloned().unwrap_or_else(|| env::panic_str("unknown proposal"));
         require!(!p.executed, "already executed");
         let me = env::predecessor_account_id();
@@ -608,21 +783,20 @@ impl Vault {
         self.admin.insert(id, p);
     }
 
-    /// Anyone can execute once enough CURRENT guardians approved and the delay passed.
+    /// Anyone can execute once enough CURRENT eligible seats approved and the delay passed.
     pub fn execute_admin(&mut self, id: u64) {
         let mut p = self.admin.get(&id).cloned().unwrap_or_else(|| env::panic_str("unknown proposal"));
         require!(!p.executed, "already executed");
-        let valid = p.approvals.iter().filter(|a| self.config.guardians.contains(a)).count();
-        require!(valid >= self.config.guardian_threshold as usize, "not enough guardian approvals");
+        require!(self.count(&p.approvals) >= self.required(self.config.admin_threshold), "not enough council approvals");
         require!(env::block_timestamp() >= p.eta_ns.0, "admin delay not passed");
         match p.action.clone() {
             AdminAction::SetOperator { operator } => self.config.operator = operator,
-            AdminAction::SetGuardians { guardians, threshold } => {
-                validate_guardians(&guardians, threshold);
-                self.config.guardians = guardians;
-                self.config.guardian_threshold = threshold;
-            }
             AdminAction::SetDailyHuntCap { cap } => self.config.daily_hunt_cap = cap,
+            AdminAction::SetExcluded { accounts } => {
+                self.config.excluded = accounts;
+                let excluded: Vec<AccountId> = self.seats.iter().map(|s| s.account_id.clone()).filter(|a| self.is_excluded(a)).collect();
+                self.seats.retain(|s| !excluded.contains(&s.account_id));
+            }
             AdminAction::RevokeDistribution { epoch } => {
                 let mut d = self.distributions.get(&epoch).cloned().unwrap_or_else(|| env::panic_str("unknown epoch"));
                 if !d.vetoed {
@@ -631,7 +805,10 @@ impl Vault {
                     self.distributions.insert(epoch, d);
                 }
             }
-            AdminAction::Unpause => self.paused = false,
+            AdminAction::Unpause => {
+                self.paused = false;
+                self.pause_round += 1;
+            }
         }
         p.executed = true;
         emit("admin_executed", json!(p));

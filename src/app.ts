@@ -34,6 +34,9 @@ import { DexScreenerMarket } from "./market/dexscreener.ts";
 import { OnChainSafety } from "./market/safety.ts";
 import type { MarketDataProvider, SafetyChecker } from "./market/types.ts";
 import { HuntEngine } from "./trading/hunt.ts";
+import { ShadowBook } from "./trading/shadow.ts";
+import { variantConfig } from "./trading/evaluate.ts";
+import { parseUnits } from "./shared/money.ts";
 import { A, balance } from "./treasury/ledger.ts";
 import { FastNearHolderIndex, StaticHolderSource, type HolderSource } from "./distribution/holders.ts";
 
@@ -93,7 +96,7 @@ export async function buildApp(cfg: Config, opts: { db?: Db; clock?: Clock; log?
   } else {
     sol = new SolanaChain(cfg.SOLANA_RPC_URL);
     const jup = new JupiterClient(cfg.JUPITER_BASE_URL, cfg.JUPITER_API_KEY || undefined);
-    const ds = new DexScreenerMarket(cfg.DEXSCREENER_BASE_URL, log.child({ mod: "market" }), { pumpPortalWs: cfg.PUMPPORTAL_DISCOVERY ? cfg.PUMPPORTAL_WS_URL : undefined });
+    const ds = new DexScreenerMarket(cfg.DEXSCREENER_BASE_URL, log.child({ mod: "market" }), { pumpPortalWs: cfg.PUMPPORTAL_DISCOVERY ? cfg.PUMPPORTAL_WS_URL : undefined, gecko: cfg.GECKO_DISCOVERY });
     market = ds;
     safety = new OnChainSafety(sol);
     if (cfg.liveTrading) {
@@ -123,6 +126,10 @@ export async function buildApp(cfg: Config, opts: { db?: Db; clock?: Clock; log?
       modeDelayMs: cfg.VAULT_MODE_DELAY_HOURS * 3_600_000,
       distributionDelayMs: cfg.VAULT_DISTRIBUTION_DELAY_HOURS * 3_600_000,
       dailyHuntCap: cfg.vaultDailyHuntCap,
+      seatsMax: cfg.VAULT_COUNCIL_SEATS,
+      minSeatBalance: cfg.vaultMinSeatBalance,
+      excluded: [...cfg.EXCLUDED_HOLDER_ACCOUNTS, cfg.MEME_TOKEN_CONTRACT_ID, cfg.OPERATOR_ACCOUNT_ID].filter(Boolean),
+      balanceOf: async (a) => (await chain.ftBalances(cfg.MEME_TOKEN_CONTRACT_ID, [a], await chain.finalBlock())).get(a) ?? 0n,
     });
   }
   const nearDepositor: Depositor = new VaultDepositor(vault);
@@ -165,7 +172,29 @@ export async function buildApp(cfg: Config, opts: { db?: Db; clock?: Clock; log?
       ? new StaticHolderSource(() => (chain as SimNearChain).allHolders())
       : new FastNearHolderIndex(db, cfg.MEME_TOKEN_CONTRACT_ID, cfg.FASTNEAR_TX_API_URL, cfg.FASTNEAR_API_URL, log.child({ mod: "holders" }));
 
-  const hunt = new HuntEngine({ db, clock, cfg, log: log.child({ mod: "hunt" }), market, safety, exec, instanceId, vault });
+  // Shadow comparison books: each variant trades virtual capital on the same scans (paper fills on real quotes).
+  const quoteSource = { quote: (side: "buy" | "sell", mint: string, amount: bigint) => (side === "buy" ? exec.quoteBuy(mint, amount) : exec.quoteSell(mint, amount)) };
+  const shadows = cfg.SHADOW_VARIANTS.map(
+    (name) =>
+      new ShadowBook(
+        db,
+        clock,
+        variantConfig(cfg, name),
+        new PaperExecution(quoteSource, { extraSlippageBps: cfg.PAPER_EXTRA_SLIPPAGE_BPS, failureRate: cfg.PAPER_TX_FAILURE_RATE, priorityFeeLamports: cfg.PRIORITY_FEE_LAMPORTS, seed: cfg.PAPER_SEED, ledgerSol: async () => 0n }),
+        safety,
+        log.child({ mod: `shadow:${name}` }),
+        {
+          startLamports: parseUnits(cfg.SHADOW_START_SOL, 9),
+          maxConcurrent: cfg.MAX_CONCURRENT_POSITIONS,
+          sizePct: cfg.POSITION_SIZE_PERCENT,
+          minPositionLamports: cfg.minPositionLamports,
+          priorityFeeLamports: cfg.PRIORITY_FEE_LAMPORTS,
+          tradeSlippageBps: cfg.TRADE_SLIPPAGE_BPS,
+          reentryCooldownMs: cfg.REENTRY_COOLDOWN_HOURS * 3_600_000,
+        },
+      ),
+  );
+  const hunt = new HuntEngine({ db, clock, cfg, log: log.child({ mod: "hunt" }), market, safety, exec, instanceId, vault, shadows });
 
   return {
     cfg,

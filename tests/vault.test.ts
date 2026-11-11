@@ -4,7 +4,8 @@ import { makeHarness, pump, setMode, deposit, balances, integrity, hotToken, hun
 import { parseUnits, NEAR_DECIMALS } from "../src/shared/money.ts";
 import { fundTrading } from "../src/bridge/bridge.ts";
 import { requestClaim, payClaim } from "../src/distribution/claims.ts";
-import { proofsFor, snapshotHash, watchVault } from "../src/distribution/vault-sync.ts";
+import { proofsFor, snapshotHash, watchVault, syncSeats } from "../src/distribution/vault-sync.ts";
+import { BAG } from "./helpers.ts";
 import { buildPayoutTree, leafHash, verifyProof } from "../src/distribution/merkle.ts";
 import type { SimVault } from "../src/near/vault.ts";
 import { silentLogger } from "../src/shared/log.ts";
@@ -56,7 +57,7 @@ describe("vault-governed treasury", () => {
     const sync = await h.db.query<{ mode: string; snapshot_hash: string; status: string }>("SELECT mode, snapshot_hash, status FROM vault_mode_syncs ORDER BY cycle_id DESC LIMIT 1");
     expect(sync.rows[0]).toMatchObject({ mode: "AutoHunt", status: "done" });
     const r = await h.app.hunt.tick({ force: true });
-    expect(r.paused).toContain("vault has not activated AUTO HUNT yet (time-lock or guardian veto)");
+    expect(r.paused).toContain("vault has not activated AUTO HUNT yet (time-lock or council veto)");
 
     h.clock.advance(13 * HOUR);
     expect(await fundTrading(h.app.bridge)).toMatchObject({ started: true });
@@ -65,7 +66,7 @@ describe("vault-governed treasury", () => {
     expect(b.solAvailable > 0n).toBe(true);
   });
 
-  it("a guardian veto of the AUTO HUNT activation keeps the treasury out of trading", async () => {
+  it("a council veto of the AUTO HUNT activation keeps the treasury out of trading", async () => {
     h = await makeHarness({ VAULT_MODE_DELAY_HOURS: "12" });
     await setMode(h, "AUTO_HUNT");
     vaultOf(h).vetoMode();
@@ -149,7 +150,7 @@ describe("vault-governed treasury", () => {
     expect((await integrity(h)).ok).toBe(true);
   });
 
-  it("a guardian veto returns the list's money to the pool and cancels claims against it", async () => {
+  it("a council veto returns the list's money to the pool and cancels claims against it", async () => {
     h = await makeHarness({ MIN_DISTRIBUTION_POOL_USD: "5", VAULT_DISTRIBUTION_DELAY_HOURS: "24" });
     await setMode(h, "DISTRIBUTE");
     await deposit(h, "10.5");
@@ -186,7 +187,7 @@ describe("vault-governed treasury", () => {
     expect(st.pending_mode?.cycle_id ?? st.mode_cycle).toBe(r.cycleId); // matured, applied lazily on the next call
   });
 
-  it("a paused vault blocks claims until guardians unpause", async () => {
+  it("a paused vault blocks claims until the council unpauses", async () => {
     h = await makeHarness({ MIN_DISTRIBUTION_POOL_USD: "5" });
     await setMode(h, "DISTRIBUTE");
     await deposit(h, "10.5");
@@ -199,5 +200,27 @@ describe("vault-governed treasury", () => {
     expect((await h.db.query("SELECT status FROM reward_claims")).rows[0]).toEqual({ status: "pending" });
     vaultOf(h).paused = false;
     expect(await payClaim(claimDeps(h), claimId)).toBe("paid");
+  });
+});
+
+describe("Holder Council (top holders, contested on chain)", () => {
+  it("the bot seats the actual top holders; a bigger holder takes the smallest seat; pools and dust never sit", async () => {
+    h = await makeHarness({ VAULT_COUNCIL_SEATS: "2", VAULT_MIN_SEAT_BALANCE: "2000", EXCLUDED_HOLDER_ACCOUNTS: "pool.near" });
+    await h.chain.setBalance("pool.near", BAG(1_000_000)); // excluded protocol account
+    expect(await syncSeats(vdeps(h), h.app.holders)).toEqual({ nominated: ["alice.near", "bob.near"] }); // carol (1000) is below the minimum
+    expect((await h.app.vault.seats()).map((x) => x.account_id).sort()).toEqual(["alice.near", "bob.near"]);
+
+    // A new whale buys in: it replaces the smallest seat (bob).
+    await h.chain.setBalance("whale.near", BAG(50_000));
+    expect(await syncSeats(vdeps(h), h.app.holders)).toEqual({ nominated: ["whale.near"] });
+    expect((await h.app.vault.seats()).map((x) => x.account_id).sort()).toEqual(["alice.near", "whale.near"]);
+
+    // The vault itself re-checks balances: nobody can be seated over a larger holder.
+    const tx = await h.app.vault.prepare({ method: "claim_seat", args: { candidate: "carol.near", replace: "alice.near" } });
+    expect((await h.app.vault.send(tx)).events.map((e) => e.event)).toEqual(["seat_rejected"]);
+    const bad = await h.app.vault.prepare({ method: "claim_seat", args: { candidate: "pool.near", replace: "alice.near" } });
+    expect((await h.app.vault.send(bad)).state).toBe("failure");
+    // Nothing to change: a second run nominates no one.
+    expect(await syncSeats(vdeps(h), h.app.holders)).toEqual({ nominated: [] });
   });
 });

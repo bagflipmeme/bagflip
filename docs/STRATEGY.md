@@ -22,7 +22,65 @@ So BAGFLIP hunts tokens that have **survived the launch phase and are igniting**
 
 when volume is **accelerating**, **buyers outnumber sellers**, and the move is **not yet vertical**.
 
-## Discovery
+## Variants: `aggressive` (default) and `original`
+
+The engine runs one variant (`STRATEGY_VARIANT`). Shadow paper books (`SHADOW_VARIANTS`) run others side
+by side on the **same scans** with equal virtual capital, so they can be compared honestly
+(`/experiment`, `/funnel`, `node scripts/paper-compare.ts`).
+
+| | original | aggressive |
+|---|---|---|
+| Entry score | 0.65 | **0.52** |
+| Confirmation | always 2 scans ≥20s apart, price not down >2% | **immediate** at score ≥0.68 or for a graduate ≤20 min old; otherwise a 2nd scan ≥8s later, price not down >6% |
+| Min pair age | 10 min | 3 min on the curve, **0 for fresh graduates** |
+| Market cap | $25k – $8M | $12k – $25M |
+| Liquidity (AMM) | ≥$12k | ≥$6k |
+| Trades | ≥150/h and ≥15/5m | ≥60/h and ≥6/5m (1h count waived for fresh graduates) |
+| Sellers vs buyers (5m) | reject if sells > 1.25× buys | reject if sells > 1.6× buys |
+| 5m change | must be > 0% | must be > −3% |
+| 1h change | must be > 0% | must be > −15% (not applied to pairs under 1h old) |
+| Vertical-candle cap | +60% 5m / +500% 1h | +150% 5m / +2000% 1h |
+| Holder concentration | top-1 ≤12%, top-10 ≤35%, creator ≤8%; rejects if unknown | top-1 ≤20%, top-10 ≤50%, creator ≤12%; proceeds if the RPC won't say |
+| Round trip / price impact | ≤12% / ≤4% | ≤15% / ≤6% |
+| Exits | −30% stop, sell half at +80%, trail 25% after +40% | −35% stop, sell 40% at +60%, **trail 22% after +30%**, momentum-fade exit after 2h |
+
+**Never relaxed, for any variant:**
+* no mint authority, no freeze authority;
+* no risky Token-2022 extensions (transfer fee, permanent delegate, transfer hook, non-transferable,
+  default frozen, pausable);
+* a real buy-then-**sell-back** quote must exist, so honeypots are skipped;
+* simulation before every live transaction, settlement read from the chain, and the same ledger and
+  idempotency rules.
+
+**No forced trades.** Neither variant has a trade-frequency target. If nothing qualifies, nothing is
+bought.
+
+### Continuous discovery
+* PumpPortal: every launch is re-checked from 2 minutes old on a growing interval (instead of a
+  single look at 12 minutes). Dead launches are dropped.
+* Graduations, from PumpPortal migration events, brand-new PumpSwap pools on GeckoTerminal, or a pair
+  seen flipping from `pumpfun` to `pumpswap`, enter a **10-second fast lane** for 30 minutes.
+* Curve tokens above about $30k market cap (close to graduating) are re-checked every 15 seconds.
+* GeckoTerminal, free, polled each minute: 5-minute trending pools, the newest PumpSwap pools, and the
+  most active Pump.fun curve pools.
+* DexScreener profiles and boosts, as before.
+
+### Scanner funnel
+Every scan records, per variant, what happened to each candidate and why:
+
+* **discovered:** new tokens, by source;
+* **checked → snapshots** (tokens with no SOL pair are counted separately);
+* **filtered:** each hard-filter reason, normalized;
+* **scored → below threshold**;
+* **waiting:** first sighting, cooldown, already held;
+* **confirmed;**
+* **rejected:** by safety, by quotes (no route / impact / round trip / API error), or by sizing;
+* **executed / failed entries;**
+* sample tokens.
+
+See `/funnel` in Telegram (admins), `GET /admin/funnel?hours=24`, or the `scan_funnel` table.
+
+## Discovery (original description)
 
 * PumpPortal free WebSocket: `subscribeNewToken` (each launch gets one look after ~12 minutes) and
   `subscribeMigration` (re-checked every 30s for 24h). Verified 2026-11-09: create events carry `mint`,

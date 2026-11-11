@@ -79,24 +79,45 @@ export class RateLimiter {
 
 interface WatchEntry extends DiscoveryEvent {
   lastChecked: number;
+  checks: number;
+  lastMcap: number | null;
+  lastDex: string | null;
+  /** When graduation was observed (PumpPortal migration event, or the pair flipping pumpfun → pumpswap). */
+  migratedAt?: number;
+  sources: Set<string>;
 }
+
+export interface DiscoveryStats {
+  watchlist: number;
+  bySource: Record<string, number>;
+  /** New mints added since the previous stats() call, by source. */
+  newSinceLast: Record<string, number>;
+  hotCurve: number;
+  freshGraduates: number;
+}
+
+const GECKO = "https://api.geckoterminal.com/api/v2";
 
 export class DexScreenerMarket implements MarketDataProvider {
   readonly name = "dexscreener";
   private watch = new Map<string, WatchEntry>();
   private limiterPairs = new RateLimiter(4); // documented 300/min
   private limiterProfiles = new RateLimiter(0.8); // documented 60/min
+  private limiterGecko = new RateLimiter(0.4, 2); // GeckoTerminal free tier ~30/min
   private lastProfilePoll = 0;
+  private lastGeckoPoll = 0;
+  private newCounts: Record<string, number> = {};
   private ws?: WebSocket;
   private wsStopped = false;
 
   private baseUrl: string;
   private log: Logger;
-  private opts: { pumpPortalWs?: string; maxWatch?: number };
-  constructor(baseUrl: string, log: Logger, opts: { pumpPortalWs?: string; maxWatch?: number } = {}) {
+  private opts: { pumpPortalWs?: string; maxWatch?: number; gecko?: boolean };
+  constructor(baseUrl: string, log: Logger, opts: { pumpPortalWs?: string; maxWatch?: number; gecko?: boolean } = {}) {
     this.baseUrl = baseUrl;
     this.log = log;
-    this.opts = opts;}
+    this.opts = opts;
+  }
 
   /** Start the free PumpPortal discovery stream (new tokens + migrations). */
   startDiscoveryStream() {
@@ -137,23 +158,57 @@ export class DexScreenerMarket implements MarketDataProvider {
   add(e: DiscoveryEvent) {
     const ex = this.watch.get(e.mint);
     if (ex) {
-      // A migration upgrades a new-token entry.
-      if (e.source === "migration" && ex.source !== "migration") Object.assign(ex, { source: "migration", at: e.at });
+      ex.sources.add(e.source);
+      if (e.source === "migration") {
+        // Graduation: switch to the fast lane immediately.
+        if (!ex.migratedAt) ex.migratedAt = e.at;
+        ex.source = "migration";
+        ex.lastChecked = 0;
+      }
       if (e.creator && !ex.creator) ex.creator = e.creator;
       if (e.bondingCurve && !ex.bondingCurve) ex.bondingCurve = e.bondingCurve;
       return;
     }
-    this.watch.set(e.mint, { ...e, lastChecked: 0 });
-    const max = this.opts.maxWatch ?? 3000;
+    this.newCounts[e.source] = (this.newCounts[e.source] ?? 0) + 1;
+    this.watch.set(e.mint, { ...e, lastChecked: 0, checks: 0, lastMcap: null, lastDex: null, migratedAt: e.source === "migration" ? e.at : undefined, sources: new Set([e.source]) });
+    const max = this.opts.maxWatch ?? 5000;
     if (this.watch.size > max) {
-      // Evict the oldest unchecked new tokens first.
-      const victims = [...this.watch.values()].sort((a, b) => (a.source === "new_token" ? 0 : 1) - (b.source === "new_token" ? 0 : 1) || a.at - b.at);
+      // Evict quiet new launches first, then the oldest entries.
+      const quiet = (w: WatchEntry) => (w.source === "new_token" && (w.lastMcap ?? 0) < 15_000 ? 0 : 1);
+      const victims = [...this.watch.values()].sort((a, b) => quiet(a) - quiet(b) || a.at - b.at);
       for (const v of victims.slice(0, this.watch.size - max)) this.watch.delete(v.mint);
     }
   }
 
   drop(mint: string) {
     this.watch.delete(mint);
+  }
+
+  /** Feed back what a snapshot showed, so hot tokens get rechecked faster. */
+  observe(m: TokenMarket) {
+    const w = this.watch.get(m.mint);
+    if (!w) return;
+    if (w.lastDex === "pumpfun" && m.dexId === "pumpswap" && !w.migratedAt) w.migratedAt = m.observedAt; // graduation seen in data
+    w.lastMcap = m.marketCapUsd;
+    w.lastDex = m.dexId;
+  }
+
+  migratedAt(mint: string): number | undefined {
+    return this.watch.get(mint)?.migratedAt;
+  }
+
+  stats(now = Date.now()): DiscoveryStats {
+    const bySource: Record<string, number> = {};
+    let hotCurve = 0;
+    let freshGraduates = 0;
+    for (const w of this.watch.values()) {
+      bySource[w.source] = (bySource[w.source] ?? 0) + 1;
+      if (w.lastDex === "pumpfun" && (w.lastMcap ?? 0) >= 30_000) hotCurve++;
+      if (w.migratedAt && now - w.migratedAt < 30 * 60_000) freshGraduates++;
+    }
+    const newSinceLast = this.newCounts;
+    this.newCounts = {};
+    return { watchlist: this.watch.size, bySource, newSinceLast, hotCurve, freshGraduates };
   }
 
   private async getJson<T>(path: string, limiter: RateLimiter): Promise<T> {
@@ -179,24 +234,92 @@ export class DexScreenerMarket implements MarketDataProvider {
     }
   }
 
+  /**
+   * GeckoTerminal (free, verified 2026-11-11): 5-minute trending pools (mostly PumpSwap), the newest
+   * PumpSwap pools (fresh graduates) and the busiest Pump.fun curve pools (tokens nearing graduation).
+   */
+  private async pollGecko(now: number) {
+    if (this.opts.gecko === false || now - this.lastGeckoPoll < 60_000) return;
+    this.lastGeckoPoll = now;
+    const feeds: [string, DiscoveryEvent["source"]][] = [
+      ["/networks/solana/trending_pools?page=1&duration=5m", "trending"],
+      ["/networks/solana/dexes/pumpswap/pools?page=1&sort=pool_created_at_desc", "new_pool"],
+      ["/networks/solana/dexes/pump-fun/pools?page=1&sort=h24_tx_count_desc", "curve_active"],
+    ];
+    for (const [path, source] of feeds) {
+      try {
+        await this.limiterGecko.take();
+        const res = await fetch(`${GECKO}${path}`, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(15_000) });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const j = (await res.json()) as { data?: { attributes?: { pool_created_at?: string }; relationships?: { base_token?: { data?: { id?: string } } } }[] };
+        for (const p of j.data ?? []) {
+          const id = p.relationships?.base_token?.data?.id ?? "";
+          if (!id.startsWith("solana_")) continue;
+          const mint = id.slice(7);
+          if (mint === WSOL_MINT) continue;
+          const created = p.attributes?.pool_created_at ? Date.parse(p.attributes.pool_created_at) : now;
+          // A brand-new PumpSwap pool is a graduation.
+          if (source === "new_pool" && now - created < 2 * 3_600_000) this.add({ mint, source: "migration", at: created });
+          else this.add({ mint, source, at: now });
+        }
+      } catch (e) {
+        this.log.warn("geckoterminal discovery failed", { path, error: String(e) });
+      }
+    }
+  }
+
+  /** How often a watched token is re-checked (0 = drop it). */
+  private interval(w: WatchEntry, now: number): number {
+    const age = now - w.at;
+    if (w.migratedAt) {
+      const since = now - w.migratedAt;
+      if (since < 30 * 60_000) return 10_000; // fresh graduate: fast lane
+      if (since < 3 * 3_600_000) return 20_000;
+      return 45_000;
+    }
+    if (w.lastDex === "pumpfun" && (w.lastMcap ?? 0) >= 30_000) return 15_000; // nearing graduation
+    if (w.source === "trending") return 30_000;
+    if (w.source === "new_token") {
+      if (age < 2 * 60_000) return -1; // not yet
+      if (w.checks > 0 && age > 30 * 60_000 && (w.lastMcap ?? 0) < 6_000) return 0; // dead launch
+      if (age > 2 * 3_600_000 && (w.lastMcap ?? 0) < 15_000) return 0;
+      return age < 20 * 60_000 ? 60_000 : 120_000;
+    }
+    return 60_000;
+  }
+
+  private priority(w: WatchEntry, now: number): number {
+    if (w.migratedAt && now - w.migratedAt < 30 * 60_000) return 0;
+    if (w.lastDex === "pumpfun" && (w.lastMcap ?? 0) >= 30_000) return 1;
+    if (w.source === "trending" || w.source === "migration") return 2;
+    if (w.source === "new_token") return 4;
+    return 3;
+  }
+
   async candidates(now: number): Promise<DiscoveryEvent[]> {
     await this.pollProfiles(now);
-    const out: DiscoveryEvent[] = [];
+    await this.pollGecko(now);
+    const due: WatchEntry[] = [];
     for (const w of this.watch.values()) {
-      const age = now - w.at;
-      if (age > 24 * 3_600_000) {
+      if (now - w.at > 24 * 3_600_000 && !(w.migratedAt && now - w.migratedAt < 24 * 3_600_000)) {
         this.watch.delete(w.mint);
         continue;
       }
-      // New launches are only worth a look after ~12 minutes (most rugs and bundles resolve by then).
-      if (w.source === "new_token" && age < 12 * 60_000) continue;
-      if (w.source === "new_token" && w.lastChecked > 0) continue; // one look; survivors get promoted by the scanner
-      const interval = w.source === "migration" ? 30_000 : 60_000;
-      if (now - w.lastChecked < interval) continue;
-      w.lastChecked = now;
-      out.push(w);
+      const iv = this.interval(w, now);
+      if (iv === 0) {
+        this.watch.delete(w.mint);
+        continue;
+      }
+      if (iv < 0 || now - w.lastChecked < iv) continue;
+      due.push(w);
     }
-    return out.slice(0, 120);
+    due.sort((a, b) => this.priority(a, now) - this.priority(b, now) || a.lastChecked - b.lastChecked);
+    const picked = due.slice(0, 150);
+    for (const w of picked) {
+      w.lastChecked = now;
+      w.checks++;
+    }
+    return picked.map((w) => ({ mint: w.mint, source: w.source, at: w.at, creator: w.creator, bondingCurve: w.bondingCurve }));
   }
 
   /** Mark a mint as "still interesting" so it keeps getting rechecked. */

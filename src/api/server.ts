@@ -22,6 +22,7 @@ import { currentDecision } from "../governance/cycle.ts";
 import { notify, esc } from "../shared/outbox.ts";
 import { payoutTree, proofsFor, canonicalSnapshot } from "../distribution/vault-sync.ts";
 import { sha256Hex } from "../distribution/merkle.ts";
+import { funnelReport, experimentReport } from "../trading/report.ts";
 
 const json = (res: ServerResponse, status: number, body: unknown) => {
   res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
@@ -145,7 +146,7 @@ export function createApiServer(app: App, telegramWebhook?: (req: IncomingMessag
         });
       }
       if (req.method === "GET" && path === "/public/vault") {
-        return json(res, 200, { vault: cfg.TREASURY_NEAR_ADDRESS, status: await app.vault.status(), distributions: (await db.query("SELECT event_id, epoch, root, data_hash, total, status, tx_hash, activates_at FROM vault_distributions ORDER BY event_id DESC LIMIT 50")).rows, mode_syncs: (await db.query("SELECT * FROM vault_mode_syncs ORDER BY cycle_id DESC LIMIT 30")).rows });
+        return json(res, 200, { vault: cfg.TREASURY_NEAR_ADDRESS, status: await app.vault.status(), council: await app.vault.seats(), distributions: (await db.query("SELECT event_id, epoch, root, data_hash, total, status, tx_hash, activates_at FROM vault_distributions ORDER BY event_id DESC LIMIT 50")).rows, mode_syncs: (await db.query("SELECT * FROM vault_mode_syncs ORDER BY cycle_id DESC LIMIT 30")).rows });
       }
       if (req.method === "GET" && path === "/public/ledger") {
         const j = await db.query("SELECT j.id, j.kind, j.ref_type, j.ref_id, j.memo, j.created_at, json_agg(json_build_object('account', e.account, 'asset', e.asset, 'amount', e.amount::text)) AS entries FROM ledger_journals j JOIN ledger_entries e ON e.journal_id=j.id GROUP BY j.id ORDER BY j.id DESC LIMIT 100");
@@ -179,6 +180,14 @@ export function createApiServer(app: App, telegramWebhook?: (req: IncomingMessag
             bridge: (await db.query("SELECT id, direction, status, amount_in, amount_out, error, updated_at FROM bridge_transfers ORDER BY id DESC LIMIT 10")).rows,
             unattributed: (await db.query("SELECT * FROM unattributed_inflows WHERE status='open'")).rows,
           });
+        }
+        if (req.method === "GET" && path === "/admin/funnel") {
+          const hours = Number(url.searchParams.get("hours") ?? 24);
+          const variants = [app.hunt.vc.name, ...app.hunt.shadows.map((s) => s.label)];
+          return json(res, 200, await Promise.all(variants.map((v) => funnelReport(db, v, hours))));
+        }
+        if (req.method === "GET" && path === "/admin/experiment") {
+          return json(res, 200, await experimentReport(db, app.hunt.shadows));
         }
         if (req.method === "POST" && path === "/admin/pause") {
           const body = JSON.parse((await readBody(req)) || "{}") as { paused?: boolean };

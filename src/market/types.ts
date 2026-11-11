@@ -20,7 +20,7 @@ export interface TokenMarket {
 
 export interface DiscoveryEvent {
   mint: string;
-  source: "new_token" | "migration" | "profile" | "boost" | "sim";
+  source: "new_token" | "migration" | "profile" | "boost" | "trending" | "new_pool" | "curve_active" | "sim";
   at: number;
   creator?: string;
   bondingCurve?: string;
@@ -43,5 +43,5 @@ export interface SafetyReport {
 }
 
 export interface SafetyChecker {
-  check(m: TokenMarket, creator?: string, bondingCurve?: string): Promise<SafetyReport>;
+  check(m: TokenMarket, creator?: string, bondingCurve?: string, limits?: { maxTop1Pct: number; maxTop10Pct: number; maxCreatorPct: number }): Promise<SafetyReport>;
 }

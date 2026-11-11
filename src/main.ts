@@ -35,6 +35,7 @@ if (bot && (role === "all" || role === "bot")) {
     { command: "trades", description: "AUTO HUNT trades" },
     { command: "pnl", description: "Trading performance" },
     { command: "claim", description: "Claim rewards" },
+    { command: "council", description: "Top-holder vault council" },
     { command: "help", description: "All commands" },
   ]);
   if (cfg.TELEGRAM_WEBHOOK_SECRET) {

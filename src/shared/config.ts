@@ -69,8 +69,12 @@ const schema = z.object({
   VAULT_DISTRIBUTION_DELAY_HOURS: num(24),
   VAULT_ADMIN_DELAY_HOURS: num(48),
   VAULT_DAILY_HUNT_CAP_NEAR: str("50"),
-  VAULT_GUARDIANS: list(),
-  VAULT_GUARDIAN_THRESHOLD: num(2),
+  /** Holder Council: top holders, seats contested on chain by token balance. */
+  VAULT_COUNCIL_SEATS: num(10),
+  VAULT_MIN_SEAT_BALANCE: str("100000"),
+  VAULT_SEAT_MIN_AGE_HOURS: num(24),
+  VAULT_VETO_THRESHOLD: num(3),
+  VAULT_ADMIN_THRESHOLD: num(6),
   DEPOSIT_ALLOWED_SENDERS: list(),
   EXCLUDED_HOLDER_ACCOUNTS: list(),
   NEP413_RECIPIENT: str("bagflip-treasury-bot"),
@@ -115,7 +119,14 @@ const schema = z.object({
   POSITION_SIZE_PERCENT: num(50),
   MIN_POSITION_SOL: str("0.05"),
   MAX_POSITION_SOL: str("0"),
-  ENTRY_SCORE_THRESHOLD: num(0.65),
+  /** Live/paper engine strategy: "aggressive" (default) or "original". */
+  STRATEGY_VARIANT: z.enum(["original", "aggressive"]).optional().default("aggressive"),
+  /** Optional override of the main variant's entry score (empty = variant default: 0.52 aggressive, 0.65 original). */
+  ENTRY_SCORE_THRESHOLD: str(""),
+  /** Shadow paper books run side by side on the same market data for comparison (e.g. "original,aggressive"). */
+  SHADOW_VARIANTS: list(),
+  SHADOW_START_SOL: str("1"),
+  GECKO_DISCOVERY: bool(true),
   STOP_LOSS_PERCENT: num(30),
   TAKE_PROFIT_PERCENT: num(80),
   TAKE_PROFIT_SELL_PERCENT: num(50),
@@ -154,6 +165,7 @@ export interface Config extends RawConfig {
   maxPositionLamports: bigint;
   minEligibleTokenBalance: bigint;
   vaultDailyHuntCap: bigint;
+  vaultMinSeatBalance: bigint;
   adminIds: Set<number>;
   boundary: { timezone: string; hour: number; minute: number };
   /** True when real treasury NEAR can move (bridge, claims). */
@@ -215,6 +227,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     maxPositionLamports: parseUnits(c.MAX_POSITION_SOL, SOL_DECIMALS),
     minEligibleTokenBalance: parseUnits(c.MIN_ELIGIBLE_TOKEN_BALANCE, c.MEME_TOKEN_DECIMALS),
     vaultDailyHuntCap: parseUnits(c.VAULT_DAILY_HUNT_CAP_NEAR, NEAR_DECIMALS),
+    vaultMinSeatBalance: parseUnits(c.VAULT_MIN_SEAT_BALANCE, c.MEME_TOKEN_DECIMALS),
     adminIds: new Set(c.TELEGRAM_ADMIN_IDS.map(Number).filter(Number.isFinite)),
     boundary: { timezone: c.TIMEZONE, hour: c.DAILY_DECISION_HOUR, minute: c.DAILY_DECISION_MINUTE },
     liveTransfers: c.BAGFLIP_ENV === "live" && c.LIVE_TRANSFERS_ENABLED,
@@ -230,6 +243,7 @@ export function testConfig(over: Record<string, string> = {}): Config {
     TREASURY_NEAR_ADDRESS: "bagflip-treasury.test.near",
     CREATOR_WALLET_ADDRESS: "creator.test.near",
     TRADING_WALLET_ADDRESS: "TradingWa11et1111111111111111111111111111111",
+    STRATEGY_VARIANT: "original",
     VOTING_INITIAL_QUORUM_PERCENT: "0",
     VOTING_MIN_QUORUM_PERCENT: "0",
     VOTING_MIN_DISTINCT_WALLETS: "1",
