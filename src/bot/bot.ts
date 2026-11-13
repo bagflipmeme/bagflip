@@ -104,8 +104,11 @@ export function createBot(app: App, opts: { botInfo?: UserFromGetMe } = {}) {
       const ch = await createChallenge(db, clock, cfg, u);
       const url = `${cfg.PUBLIC_URL}/connect?c=${encodeURIComponent(ch.id)}`;
       const kb = new InlineKeyboard();
-      if (url.startsWith("https://")) kb.webApp("🔐 Verify NEAR wallet", url);
-      else kb.url("🔐 Verify NEAR wallet", url);
+      if (url.startsWith("https://")) {
+        kb.webApp("🔐 Verify NEAR wallet", url).row();
+        // Some wallets (popup-based) cannot talk to Telegram's in-app window: offer a normal browser.
+        kb.url("🌐 Open in browser instead", url);
+      } else kb.url("🔐 Verify NEAR wallet", url);
       await ctx.reply(
         [
           "<b>Connect a NEAR wallet</b>",

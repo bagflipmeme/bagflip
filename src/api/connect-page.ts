@@ -30,6 +30,8 @@ details{margin-top:14px;color:var(--tg-theme-hint-color,var(--mut))}textarea{wid
 <div class="card"><pre id="msg">${nonceOk ? "Loading challenge…" : "Invalid link. Run /connect in the bot again."}</pre></div>
 <button id="go" disabled>Connect wallet &amp; sign</button>
 <div id="st" class="status"></div>
+<p id="tghint" style="display:none">Wallet stuck on "Receiving details from Dapp"? Telegram's in-app window blocks some wallet popups. Go back to the bot and tap <b>Open in browser</b> (desktop Chrome with the Meteor/HOT extension works best), or use MyNearWallet below.</p>
+<button id="mnw" disabled style="margin-top:10px;background:#3b3f4a">Sign with MyNearWallet (redirect, works in any browser)</button>
 <details><summary>Advanced: paste a NEP-413 signature</summary>
 <p>Sign the exact message above with recipient and base64 nonce shown below, then paste JSON <code>{"accountId","publicKey","signature"}</code>.</p>
 <pre id="raw"></pre><textarea id="manual"></textarea><button id="send">Submit signature</button></details>
@@ -56,6 +58,16 @@ async function load() {
   document.getElementById("msg").textContent = ch.message;
   document.getElementById("raw").textContent = "recipient: " + ch.recipient + "\\nnonce (base64): " + ch.nonceB64;
   go.disabled = false;
+  document.getElementById("mnw").disabled = false;
+  if (tg?.initData) document.getElementById("tghint").style.display = "block";
+  // Returning from MyNearWallet: the signature comes back in the URL fragment (or query).
+  const back = new URLSearchParams(location.hash.slice(1) || location.search);
+  if (back.get("signature") && back.get("accountId") && back.get("publicKey")) {
+    history.replaceState(null, "", location.pathname + "?c=" + encodeURIComponent(id));
+    await submit({ accountId: back.get("accountId"), publicKey: back.get("publicKey"), signature: back.get("signature") });
+  } else if (back.get("errorCode") || back.get("error")) {
+    show("❌ Wallet cancelled: " + (back.get("errorMessage") || back.get("errorCode") || back.get("error")), "bad");
+  }
 }
 go.onclick = async () => {
   go.disabled = true;
@@ -64,15 +76,23 @@ go.onclick = async () => {
     const { NearConnector } = await import("https://esm.sh/@hot-labs/near-connect@0.12.0");
     const nonce = Uint8Array.from(atob(ch.nonceB64), c => c.charCodeAt(0));
     const connector = new NearConnector({ network: "mainnet" });
-    const done = new Promise((res, rej) => {
-      connector.on("wallet:signInAndSignMessage", (t) => res(t.accounts[0].signedMessage));
-      setTimeout(() => rej(new Error("Timed out waiting for the wallet")), 180000);
-    });
+    const viaEvent = new Promise((res) => connector.on("wallet:signInAndSignMessage", (t) => res(t?.accounts?.[0]?.signedMessage || null)));
     await connector.connect({ signMessageParams: { message: ch.message, recipient: ch.recipient, nonce } });
-    let signed = await done.catch(() => null);
+    show("Waiting for the wallet signature…");
+    // Some wallets connect without returning the signed message: ask them to sign directly.
+    let signed = await Promise.race([viaEvent, new Promise((r) => setTimeout(() => r(null), 4000))]);
     if (!signed) { const w = await connector.wallet(); signed = await w.signMessage({ message: ch.message, recipient: ch.recipient, nonce }); }
+    if (!signed || !signed.signature) throw new Error("The wallet returned no signature");
     await submit(signed);
   } catch (e) { show("❌ " + (e?.message || e), "bad"); go.disabled = false; }
+};
+document.getElementById("mnw").onclick = () => {
+  const u = new URL("https://app.mynearwallet.com/sign-message");
+  u.searchParams.set("message", ch.message);
+  u.searchParams.set("nonce", ch.nonceB64);
+  u.searchParams.set("recipient", ch.recipient);
+  u.searchParams.set("callbackUrl", location.origin + "/connect?c=" + encodeURIComponent(id));
+  location.href = u.toString();
 };
 document.getElementById("send").onclick = async () => {
   try { await submit(JSON.parse(document.getElementById("manual").value)); } catch (e) { show("❌ Invalid JSON", "bad"); }
