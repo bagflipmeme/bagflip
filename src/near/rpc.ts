@@ -91,12 +91,14 @@ export class NearRpc {
 
   async accessKey(accountId: string, publicKey: string): Promise<{ nonce: bigint; blockHash: string; permission: "FullAccess" | { FunctionCall: unknown } } | null> {
     try {
-      const r = await this.call<{ nonce: number | string; block_hash: string; permission: "FullAccess" | { FunctionCall: unknown } }>("query", {
+      const r = await this.call<{ nonce?: number | string; block_hash: string; permission: "FullAccess" | { FunctionCall: unknown }; error?: string }>("query", {
         request_type: "view_access_key",
         finality: "final",
         account_id: accountId,
         public_key: publicKey,
       });
+      // Some RPCs answer a missing key with HTTP 200 and { error: "access key ... does not exist" }.
+      if (r.error || r.nonce === undefined) return null;
       return { nonce: BigInt(r.nonce), blockHash: r.block_hash, permission: r.permission };
     } catch (e) {
       if (e instanceof NearRpcError && /UNKNOWN_ACCESS_KEY|UNKNOWN_ACCOUNT|does not exist/.test(e.message)) return null;
