@@ -125,7 +125,7 @@ See `/funnel` in Telegram (admins), `GET /admin/funnel?hours=24`, or the `scan_f
    tokens that buy would return. Reject if price impact is over 4% or the round trip loses over 12%.
    This catches honeypots (no sell route), thin pools and fee-heavy routes **before** money moves.
 6. **Sizing** ([src/trading/risk.ts](../src/trading/risk.ts)):
-   * size = `POSITION_SIZE_PERCENT` (50%) of BAGFLIP trading capital, at most 2 concurrent positions,
+   * size = `POSITION_SIZE_PERCENT` (25%) of BAGFLIP trading capital, at most 4 concurrent positions,
      capped by the free balance after the SOL fee reserve, network fees and token-account rent
    * if the position would be under `MIN_POSITION_SOL`, or fixed fees would be over 3% of it, the
      trade is **deferred** until more capital accumulates

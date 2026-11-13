@@ -115,8 +115,8 @@ const schema = z.object({
 
   MAX_TREASURY_TRADE_ALLOCATION_PERCENT: num(100),
   MAX_POSITION_HOLD_HOURS: num(24),
-  MAX_CONCURRENT_POSITIONS: num(2),
-  POSITION_SIZE_PERCENT: num(50),
+  MAX_CONCURRENT_POSITIONS: num(4),
+  POSITION_SIZE_PERCENT: num(25),
   MIN_POSITION_SOL: str("0.05"),
   MAX_POSITION_SOL: str("0"),
   /** Live/paper engine strategy: "aggressive" (default) or "original". */

@@ -42,7 +42,7 @@ const args = {
   mode_delay_sec: Math.round(Number(e.VAULT_MODE_DELAY_HOURS || 12) * 3600),
   distribution_delay_sec: Math.round(Number(e.VAULT_DISTRIBUTION_DELAY_HOURS || 24) * 3600),
   admin_delay_sec: Math.round(Number(e.VAULT_ADMIN_DELAY_HOURS || 48) * 3600),
-  reserve: parseUnits("1", NEAR_DECIMALS).toString(),
+  reserve: parseUnits(e.VAULT_RESERVE_NEAR || "0.05", NEAR_DECIMALS).toString(),
 };
 
 const bytes = readFileSync(wasm);
