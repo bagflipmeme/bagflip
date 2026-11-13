@@ -28,9 +28,10 @@ details{margin-top:14px;color:var(--tg-theme-hint-color,var(--mut))}textarea{wid
 <p>Your wallet will ask you to <b>sign a message</b>. Signing proves you own the account. It does not send a transaction or move funds.</p>
 <p><b>Never</b> enter a seed phrase or private key anywhere for BAGFLIP.</p>
 <div class="card"><pre id="msg">${nonceOk ? "Loading challenge…" : "Invalid link. Run /connect in the bot again."}</pre></div>
-<button id="go" disabled>Connect wallet &amp; sign</button>
+<button id="meteor" disabled>Sign with Meteor Wallet</button>
+<button id="go" disabled style="margin-top:10px;background:#3b3f4a">Other wallets (HOT, Intear, …)</button>
 <div id="st" class="status"></div>
-<p id="tghint" style="display:none">Wallet stuck on "Receiving details from Dapp"? Telegram's in-app window blocks some wallet popups. Go back to the bot and tap <b>Open in browser</b> (desktop Chrome with the Meteor/HOT extension works best). With Meteor, choose <b>Scan with your mobile device</b> and scan the QR code with the Meteor app. HOT Wallet works directly inside Telegram.</p>
+<p id="tghint" style="display:none">Using Meteor? Telegram's in-app window can block its window. Go back to the bot and tap <b>Open in browser</b> — desktop Chrome with the Meteor extension works best. HOT Wallet works directly inside Telegram.</p>
 <details><summary>Advanced: paste a NEP-413 signature</summary>
 <p>Sign the exact message above with recipient and base64 nonce shown below, then paste JSON <code>{"accountId","publicKey","signature"}</code>.</p>
 <pre id="raw"></pre><textarea id="manual"></textarea><button id="send">Submit signature</button></details>
@@ -57,6 +58,7 @@ async function load() {
   document.getElementById("msg").textContent = ch.message;
   document.getElementById("raw").textContent = "recipient: " + ch.recipient + "\\nnonce (base64): " + ch.nonceB64;
   go.disabled = false;
+  document.getElementById("meteor").disabled = false;
   if (tg?.initData) document.getElementById("tghint").style.display = "block";
 }
 go.onclick = async () => {
@@ -75,6 +77,31 @@ go.onclick = async () => {
     if (!signed || !signed.signature) throw new Error("The wallet returned no signature");
     await submit(signed);
   } catch (e) { show("❌ " + (e?.message || e), "bad"); go.disabled = false; }
+};
+// Meteor through the official NEAR Wallet Selector module: it runs in this page (no sandbox), talks to
+// the Meteor browser extension directly, and falls back to Meteor's web wallet window.
+const mb = document.getElementById("meteor");
+// Preload so the click opens Meteor immediately (browsers only allow popups right after a click).
+const meteorReady = (async () => {
+  const [{ setupWalletSelector }, { setupMeteorWallet }, { Buffer }] = await Promise.all([
+    import("https://esm.sh/@near-wallet-selector/core@10.1.4"),
+    import("https://esm.sh/@near-wallet-selector/meteor-wallet@10.1.4"),
+    import("https://esm.sh/buffer@6.0.3"),
+  ]);
+  const selector = await setupWalletSelector({ network: "mainnet", modules: [setupMeteorWallet()] });
+  return { wallet: await selector.wallet("meteor-wallet"), Buffer };
+})();
+meteorReady.catch(() => {});
+mb.onclick = async () => {
+  mb.disabled = true;
+  try {
+    show("Opening Meteor…");
+    const { wallet, Buffer } = await meteorReady;
+    show("Approve the signature in Meteor…");
+    const signed = await wallet.signMessage({ message: ch.message, recipient: ch.recipient, nonce: Buffer.from(ch.nonceB64, "base64") });
+    if (!signed || !signed.signature) throw new Error("Meteor returned no signature");
+    await submit(signed);
+  } catch (e) { show("❌ " + (e?.message || e), "bad"); mb.disabled = false; }
 };
 document.getElementById("send").onclick = async () => {
   try { await submit(JSON.parse(document.getElementById("manual").value)); } catch (e) { show("❌ Invalid JSON", "bad"); }
