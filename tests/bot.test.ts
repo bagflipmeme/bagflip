@@ -68,7 +68,8 @@ describe("telegram bot", () => {
     expect(b.calls.at(-1)!.payload.text).toMatch(/direct message/);
     await b.msg(9, "/connect");
     const kb = b.calls.at(-1)!.payload.reply_markup.inline_keyboard[0][0];
-    expect(kb.web_app.url).toMatch(/^https:\/\/bagflip\.example\/connect\?c=/);
+    expect(kb.url).toMatch(/^https:\/\/bagflip\.example\/connect\?c=/); // a browser link, not a Mini App
+    expect(kb.web_app).toBeUndefined();
     expect(b.calls.at(-1)!.payload.text).toMatch(/never<\/b> ask for your seed phrase/);
   });
 

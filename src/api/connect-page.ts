@@ -31,7 +31,7 @@ details{margin-top:14px;color:var(--tg-theme-hint-color,var(--mut))}textarea{wid
 <button id="meteor" disabled>Sign with Meteor Wallet</button>
 <button id="go" disabled style="margin-top:10px;background:#3b3f4a">Other wallets (HOT, Intear, …)</button>
 <div id="st" class="status"></div>
-<p id="tghint" style="display:none">Using Meteor? Telegram's in-app window can block its window. Go back to the bot and tap <b>Open in browser</b> — desktop Chrome with the Meteor extension works best. HOT Wallet works directly inside Telegram.</p>
+<p id="tghint" style="display:none">Opened inside Telegram? Wallet windows can be blocked here — open this link in your browser instead (desktop Chrome with the Meteor extension works best).</p>
 <details><summary>Advanced: paste a NEP-413 signature</summary>
 <p>Sign the exact message above with recipient and base64 nonce shown below, then paste JSON <code>{"accountId","publicKey","signature"}</code>.</p>
 <pre id="raw"></pre><textarea id="manual"></textarea><button id="send">Submit signature</button></details>
