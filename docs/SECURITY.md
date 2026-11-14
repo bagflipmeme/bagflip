@@ -5,13 +5,22 @@
 | Account | Chain | Key held by | What it can do |
 |---|---|---|---|
 | `bagflip-vault.near` (treasury) | NEAR | Deployer full-access key (retained until locking) | Contract rules: claims and capped `fund_trading` only. Locking removes the key ([TREASURY.md](TREASURY.md#locking-planned)). |
-| `bagflip-bot.near` (operator) | NEAR | The service (`OPERATOR_PRIVATE_KEY`) | Function-call key limited to 9 vault methods with a 0.25 NEAR gas allowance. Cannot withdraw or redirect funds. Replaceable by the council (11 seats + 48 h). |
+| `bagflip-bot.near` (operator) | NEAR | The service (`OPERATOR_PRIVATE_KEY`) | Function-call key limited to 9 vault methods with a 0.25 NEAR gas allowance. Cannot withdraw. In AUTO HUNT mode it chooses the deposit address for `fund_trading` (see below). Replaceable by the council (11 seats + 48 h, scaled to eligible seats). |
 | `bagflip.near` (creator) | NEAR | The creator | Not used by the service; it is an allowed deposit sender and a token holder. |
 | `EwMZcvgd…8FuQ` (trading wallet) | Solana | The service (`SOLANA_TRADING_PRIVATE_KEY`, live trading only) | Hot wallet that signs swaps. Receives at most the vault's 50 NEAR / 24 h cap. |
 
 **Custody boundary.** Funds in the vault are governed by contract code. Funds bridged to Solana for AUTO HUNT
 are in a wallet the service controls. That is the trust assumption of AUTO HUNT, bounded by the daily cap,
 the time lock and the council's veto and pause. A TEE-attested trading agent is the planned next step.
+
+## Known limitations of the deployed vault (v1.1.0)
+
+| Limitation | Effect | Mitigation today | Planned fix |
+|---|---|---|---|
+| Deployer full-access key retained | The contract can be redeployed until the key is deleted | Disclosed; code hash published | Lock after hardening |
+| `fund_trading` destination is supplied by the operator | In effective AUTO HUNT mode, a compromised or dishonest operator could send up to 50 NEAR / 24 h to an arbitrary account | 12 h time lock and council veto before AUTO HUNT; per-transfer `trading_fund_requested` event with the deposit address, checkable via 1Click `/v0/status`; pause | Fund via `ft_transfer_call` to `intents.near` with the configured Solana recipient encoded on chain |
+| Council thresholds scale to eligible seats (min 1) | With few eligible seats, few votes control vetoes and admin actions | 48 h admin delay; seats contested by balance | Fixed absolute minimum for admin actions |
+| Off-chain vote tally | The contract trusts the operator's `propose_mode` | Public snapshot whose sha256 is recorded on chain; council veto of AUTO HUNT | n/a (past-block balances are not readable on chain) |
 
 ## Configuration safety
 

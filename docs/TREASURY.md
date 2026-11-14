@@ -25,7 +25,7 @@ admin delay 48 h, reserve 0.05 NEAR, excluded `dclv2.ref-labs.near`.
 | Path | Caller | Enforced by the contract |
 |---|---|---|
 | `claim` / `claim_many` | Anyone (the bot relays; holders can self-claim) | Pays only the account in the payout list's Merkle leaf, after the list's 24 h veto window, once per account per list, never above the list total. A failed transfer reopens the claim. |
-| `fund_trading(amount, deposit_address, quote_ref)` | Operator | Only in effective AUTO_HUNT mode, from unreserved funds, ≤ 50 NEAR per rolling 24 h. Wraps NEAR and `ft_transfer`s wNEAR to the 1Click deposit address in one receipt; on failure the funds return and the cap is freed. |
+| `fund_trading(amount, deposit_address, quote_ref)` | Operator | Only in effective AUTO_HUNT mode, from unreserved funds, ≤ 50 NEAR per rolling 24 h. Wraps NEAR and `ft_transfer`s wNEAR to the deposit address in one receipt; on failure the funds return and the cap is freed. The contract does **not** verify that `deposit_address` belongs to a 1Click quote for the configured `trading_recipient` (see [SECURITY.md](SECURITY.md#known-limitations-of-the-deployed-vault-v110)). |
 
 ## Contract methods
 

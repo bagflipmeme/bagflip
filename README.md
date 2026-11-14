@@ -9,7 +9,6 @@ between distributing the rewards and deploying them through an autonomous cross-
 
 | | |
 |---|---|
-| Track | **Memecoins With Mechanics** (`memecoins`); also fits **Unstoppable DeFi** (`defi`) |
 | Token (NEAR, NEP-141) | [`bagflip.v2-launchpad.justhoot.near`](https://justhoot.fun/p/bagflip.v2-launchpad.justhoot.near) |
 | Treasury vault (NEAR mainnet) | `bagflip-vault.near` (code hash `5HBEhQYPoyHkaBnWXDpyRTrcUnxMiCbKmd6LfBvi48D7`) |
 | Live service | `https://bagflip-production.up.railway.app` (`/health`, `/public/vault`) |
@@ -60,7 +59,7 @@ enforceable rules?*
 | Telegram-native governance | `/connect`, one-tap DISTRIBUTE / AUTO HUNT buttons, pinned live tally |
 | Token-weighted, persistent votes | Balance snapshot at one block; strict majority; ties keep the mode |
 | NEAR vault with on-chain rules | No withdraw or upgrade method; 50 NEAR / 24h trading cap; 12h AUTO HUNT time lock; 24h payout veto window |
-| Holder Council | Top 20 holders, seats contested on chain via `ft_balance_of`; 5 seats veto or pause |
+| Holder Council | Top 20 holders, seats contested on chain via `ft_balance_of`; veto/pause 5 seats, admin 11 seats + 48 h (both scale down to the number of eligible seats) |
 | NEAR Intents funding | `fund_trading` wraps NEAR and deposits to a 1Click address in one atomic receipt |
 | Graduation Momentum engine | Continuous discovery, explainable 0–1 score, on-chain safety checks, sell-back quote, exit ladder |
 | Transparent accounting | Append-only double-entry ledger in integer units; public audit endpoints |
@@ -146,7 +145,7 @@ Requirements: Node ≥ 24, pnpm 10. Docker is optional (contract tests, Postgres
 
 ```bash
 pnpm install
-pnpm test                      # 77 tests, embedded Postgres, no network
+pnpm test                      # 77 tests, embedded Postgres, no network (also run in GitHub Actions: .github/workflows/ci.yml)
 ```
 
 Full local walkthrough (development mode, no keys): [docs/DEMO_AND_TESTING.md](docs/DEMO_AND_TESTING.md).
@@ -165,13 +164,13 @@ Full local walkthrough (development mode, no keys): [docs/DEMO_AND_TESTING.md](d
 ## 12. Hackathon scope & implementation status
 
 All code in this repository was written during NEAR HACKATHON (first commit 2026-11-11). There is no
-pre-hackathon baseline, and no other project is submitted by this team.
+pre-hackathon baseline.
 
 | Component | Status | Evidence |
 |---|---|---|
-| BAGFLIP token + creator-fee routing to vault | **Live on mainnet** | `get_token_fee_state` → `dev_id: bagflip-vault.near` |
+| BAGFLIP token + creator-fee routing to vault | **Configured on mainnet**; first launchpad payout not yet received | `get_token_fee_state` → `dev_id: bagflip-vault.near` |
 | Vault contract | **Deployed on mainnet** | Code hash above; `get_config`; 17 Rust tests |
-| Holder Council seats | **Live** (2 seats filled on chain) | `get_seats` |
+| Holder Council seats | **Live** (2 seats filled on chain; see council limits in [GOVERNANCE.md](docs/GOVERNANCE.md#5-holder-council)) | `get_seats` |
 | Telegram bot, NEP-413 linking, voting, daily decision | **Live** | Bot and group above; `/public/decisions` |
 | Operator key → vault calls | **Live** (`bagflip-bot.near` seated the council via `claim_seat`; each daily decision is sent as `propose_mode`) | Vault events, `get_seats` |
 | Distribution + claims | Implemented and tested; awaiting first creator-fee payout | `tests/vault.test.ts`, `tests/treasury-trading.test.ts` |
@@ -180,16 +179,27 @@ pre-hackathon baseline, and no other project is submitted by this team.
 
 ## 13. Security overview
 
-The vault has no withdraw or upgrade method. Funds leave only through holder claims or capped, time-locked
-trading transfers, and the Holder Council can veto or pause. During the hackathon the vault account still
-has its deployer's full-access key, kept for recoverability. Deleting it (locking) is a documented
-one-way step. The bot holds a function-call operator key and, for AUTO HUNT, the Solana trading-wallet key;
-the vault cap bounds what can reach that wallet. AUTO HUNT trades high-volatility assets, and losses can
-include the full allocated amount. Full trust model: **[docs/SECURITY.md](docs/SECURITY.md)**.
+The vault contract has no withdraw or upgrade method: funds leave only through Merkle-proven claims or
+capped, time-locked trading transfers. Current trust assumptions:
+
+* **Upgradeable until locked.** The vault account still has its deployer's full-access key, so the contract
+  can be redeployed until that key is deleted (a documented, one-way step).
+* **Operator-chosen trading destination.** In AUTO HUNT mode the operator supplies the 1Click deposit
+  address for `fund_trading`. The contract enforces mode, cap (50 NEAR / 24 h) and balance, but not the
+  destination. Every transfer is logged on chain for checking against 1Click.
+* **Off-chain tally.** Votes are counted off chain from on-chain balances. The vault records the snapshot
+  hash and the council can veto, but the contract does not recount votes.
+* **Council scaling.** Thresholds scale down to the number of eligible seats, so the council is only as
+  strong as its membership.
+* **Trading key.** The service holds the Solana trading key. AUTO HUNT trades high-volatility assets, and
+  losses can include the full allocated amount.
+
+Full trust model and planned hardening: **[docs/SECURITY.md](docs/SECURITY.md)**.
 
 ## 14. Future development
 
-* Lock the vault (delete its keys) and publish a reproducible build.
+* Harden the vault: a fixed minimum approval count for admin actions, and AUTO HUNT funding through
+  `intents.near` with the Solana recipient on chain. Then lock it (delete its keys) with a reproducible build.
 * Enable live AUTO HUNT with a small allocation once creator-fee payouts arrive.
 * Move the Solana trading key into a TEE-attested agent.
 * Exclude launchpad and pool accounts from council seats through a council admin action.

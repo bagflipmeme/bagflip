@@ -1,7 +1,8 @@
 # Governance
 
 Holders steer the treasury between **DISTRIBUTE** and **AUTO HUNT** from Telegram. The vote is computed
-off chain from on-chain balances, then mirrored to the vault, which enforces delays and vetoes.
+off chain from on-chain balances, then mirrored to the vault, which enforces delays and vetoes. The contract
+records the snapshot hash but does not recount votes.
 
 Code: `src/governance/engine.ts` (pure decision rules), `src/governance/cycle.ts` (daily cycle),
 `src/governance/wallets.ts` (linking and votes), `contracts/vault/src/lib.rs` (enforcement).
@@ -86,8 +87,14 @@ An on-chain council of top holders, managed by the vault itself (deployed values
 * **Seating:** anyone can call `claim_seat(candidate, replace)`. The vault reads `ft_balance_of` itself; a
   nominee takes a full council's seat only by holding more than that seat's current balance. The service
   nominates the current top holders every 6 hours.
-* **Scaling:** thresholds scale down to the number of eligible seats (minimum 1), so the vault cannot
-  deadlock. With 2 seats filled and none older than 24 h, 1 vote is currently required.
+* **Scaling:** required votes = `min(threshold, eligible seats)`, at least 1, for vetoes, pause **and**
+  admin actions. This prevents deadlock, but a small council has proportionally more power: with a single
+  eligible seat, that seat alone could approve an admin change (operator, cap, exclusions) after the 48 h
+  delay.
+* **Current state (2026-11-14):** 2 seats are filled: `bagflip.near` (creator) and
+  `v2-launchpad.justhoot.near`. Seats become eligible 24 h after seating (2026-11-14 19:31 UTC); until then no
+  seat can vote. After that, every council action needs 2 votes, and the launchpad contract cannot sign
+  council votes, so the council can act only once more holders take seats.
 * **Limits:** council members cannot withdraw, pay themselves or change code; the contract has no such
   method.
 
