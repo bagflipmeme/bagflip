@@ -2,6 +2,7 @@
   "name": "bagflip",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "description": "BAGFLIP — community-controlled meme treasury (Telegram + NEAR governance, Solana AUTO HUNT trading)",
   "type": "module",
   "packageManager": "pnpm@10.30.1",

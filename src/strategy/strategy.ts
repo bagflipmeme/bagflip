@@ -1,7 +1,7 @@
 /**
  * "Graduation Momentum" — BAGFLIP's initial AUTO HUNT strategy.
  *
- * Thesis (see docs/STRATEGY.md): with $5–$10/day of capital and no co-located
+ * Thesis (see docs/AUTO_HUNT.md): with $5–$10/day of capital and no co-located
  * infrastructure we cannot win the first-block sniping race on brand-new
  * Pump.fun launches, and most of those launches rug within minutes. The
  * practical edge for small capital is *momentum continuation on tokens that

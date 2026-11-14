@@ -1,326 +1,212 @@
-# BAGFLIP — community-controlled meme treasury
+<p align="center"><img src="docs/assets/bagflip-logo.webp" alt="BAGFLIP" width="160"></p>
 
-Creator tax rewards from a NEAR meme token flow into a public BAGFLIP treasury. Token holders decide in
-Telegram, continuously and weighted by holdings, between exactly two options:
+# BAGFLIP
 
-* **💰 DISTRIBUTE**: rewards are split pro-rata among holders and become claimable.
-* **🔥 AUTO HUNT**: an autonomous bot trades extremely high-risk Solana meme tokens (Pump.fun curve and
-  PumpSwap) with the treasury. It can lose 100%.
+**One More Flip. One More Chance.**
 
-NEAR is the token, governance and treasury chain. Solana is where trades execute. NEAR Intents 1Click
-moves capital between them. Telegram is the only user interface; the single web page is a wallet-signing
-Mini App.
+BAGFLIP turns a meme token's creator revenue into a community-governed treasury. Holders vote in Telegram
+between distributing the rewards and deploying them through an autonomous cross-chain trading strategy.
 
-> ⚠️ Live trading and live fund movement are **off by default**, and boot refuses unsafe configurations.
-> See [docs/SECURITY_AND_COMPLIANCE.md](docs/SECURITY_AND_COMPLIANCE.md) for the legal questions that
-> must be answered before a public launch.
+| | |
+|---|---|
+| Track | **Memecoins With Mechanics** (`memecoins`); also fits **Unstoppable DeFi** (`defi`) |
+| Token (NEAR, NEP-141) | [`bagflip.v2-launchpad.justhoot.near`](https://justhoot.fun/p/bagflip.v2-launchpad.justhoot.near) |
+| Treasury vault (NEAR mainnet) | `bagflip-vault.near` (code hash `5HBEhQYPoyHkaBnWXDpyRTrcUnxMiCbKmd6LfBvi48D7`) |
+| Live service | `https://bagflip-production.up.railway.app` (`/health`, `/public/vault`) |
+| Telegram | Bot [@bagflip_bot](https://t.me/bagflip_bot) · Group [t.me/bagfliptrade](https://t.me/bagfliptrade) |
+| Demo video | [x.com/bagflipmeme/status/2121600860379869318](https://x.com/bagflipmeme/status/2121600860379869318) |
 
-**Trust model:** the reward treasury `bagflip.near` is a smart contract with **no keys**. See
-[docs/VAULT.md](docs/VAULT.md).
-* Money leaves it only as claims to the accounts in a published payout list, or as capped transfers
-  to the trading route.
-* AUTO HUNT activation and every payout list are time-locked, and the **Holder Council** can veto them.
-  The council is the top 10 BAGFLIP holders, decided on chain by token balance.
-* The bot holds only an operator key that can call those vault methods and nothing else.
+## 1. Project overview
 
-## How it works
+A meme token earns creator fees whenever it trades. In BAGFLIP that revenue does not go to a creator
+wallet: it flows into a NEAR smart-contract vault, and holders decide what happens to it. Every day the
+community chooses one of two modes:
 
-```
- Creator wallet ──(rewards)──▶ BAGFLIP VAULT contract (NEAR, no keys) ──1Click──▶ Trading wallet (Solana)
-        (never signed for)              │  fund_trading: AUTO_HUNT only,  │  Jupiter V2 / PumpPortal
-                                        │  time-locked, 24h cap           │
-                                        │  bot ledger mirror: available / │
-                                        │  distribution pool /            │  scanner → score → confirm →
-                                        │  claimable / in-transit         │  safety → round-trip → trade
-                                        ▼                                 ▼
-             Merkle payout list (veto window) ◀──── 1Click ◀──── wind-down on DISTRIBUTE
-             claim → vault pays the listed account (bot relays, or self-claim)
-```
+* **💰 DISTRIBUTE**: the treasury is split pro-rata among holders, who claim from the vault.
+* **🔥 AUTO HUNT**: capped amounts move to Solana through NEAR Intents, where an autonomous
+  "Graduation Momentum" engine trades Pump.fun meme tokens.
 
-### Governance rules ([src/governance/engine.ts](src/governance/engine.ts))
+The community decides **whether** to hunt. The engine decides **what, when and how** to trade, inside
+limits the vault enforces.
 
-* **Voting power = eligible token balance** of each verified wallet, read **at one NEAR block** at
-  00:00 Asia/Kuala_Lumpur. Moving tokens between wallets can't double-count them.
-* **Votes are continuous.** A vote persists across days until it is changed, revoked or the wallet is
-  unlinked. Votes cast after midnight count for the next cycle: they're reconstructed "as of" the
-  boundary from the append-only `vote_events` log.
-* **Mode changes require a strict majority.** The mode changes only if the other option has **more than
-  50%** of valid weighted votes **and** quorum is met. An exact 50/50 tie, zero valid votes or missed
-  quorum all keep the previous mode.
-* **Starts INACTIVE.** The system starts with no trading. The first activation needs
-  `VOTING_INITIAL_QUORUM_PERCENT` of eligible supply and `VOTING_MIN_DISTINCT_WALLETS`; later switches
-  need `VOTING_MIN_QUORUM_PERCENT`.
-* **Eligible supply** is total supply minus excluded accounts (treasury, token contract, and
-  `EXCLUDED_HOLDER_ACCOUNTS`).
-  * The Rhea DCL pool `dclv2.ref-labs.near` holds most of the BAGFLIP supply; it and `intents.near` are
-    excluded by default in `.env.example`.
-* **Auditable.** Every decision stores block height and hash, totals, quorum, reason and config, plus one
-  immutable snapshot row per wallet (`/public/decisions/<cycle>`).
+## 2. Problem statement
 
-### Daily cycle ([src/governance/cycle.ts](src/governance/cycle.ts))
+* **Rewards depend on trading.** Creator fees shrink when volume fades, and holders have no lever to
+  put accumulated revenue to work.
+* **Holders are passive.** Beyond buy, hold and sell, meme holders rarely take part in real decisions.
+* **The creator controls the revenue.** How fees are used is usually the creator's call.
+* **No treasury rules.** Meme communities seldom have a structured, enforceable way to choose between
+  paying out and reinvesting.
 
-* A durable job fires at 00:00 MYT and takes the balance snapshot.
-* It records the decision, posts it, and queues the treasury operation:
-  * **AUTO HUNT**: unreserved funds are bridged once they reach `MIN_CROSS_CHAIN_TRANSFER_USD`, and the
-    engine may open positions.
-  * **DISTRIBUTE**: new buys stop at once, unsent buy orders are cancelled, positions are unwound (with
-    escalating slippage for up to `WINDDOWN_MAX_HOURS`, then written off), and idle SOL is bridged
-    home. Available NEAR is reserved into the distribution pool and distributed pro-rata once it reaches
-    `MIN_DISTRIBUTION_POOL_USD`.
-* Double triggers are no-ops.
-* After downtime, the missed boundary is caught up (using the exact boundary block when the RPC still
-  has it).
+The question BAGFLIP answers: *how can creator revenue become a community-governed treasury with
+enforceable rules?*
 
-### Treasury accounting ([src/treasury/ledger.ts](src/treasury/ledger.ts))
+## 3. Solution
 
-The ledger is append-only and double-entry, with bigint smallest units only (yoctoNEAR, lamports). It
-distinguishes:
+* Creator fees are routed to a **vault contract** whose only exits are Merkle-proven holder claims and
+  capped, time-locked trading transfers.
+* Holders link a NEAR wallet in Telegram (NEP-413 signature) and vote with buttons. **Voting power is
+  their BAGFLIP balance**, read at one NEAR block for each daily decision.
+* Votes are **continuous**: they stay active until changed. A decision is taken every day at 00:00
+  Asia/Kuala_Lumpur and mirrored to the vault.
+* A **Holder Council** of top holders, seated on chain by token balance, can veto payout lists and AUTO HUNT
+  activations, or pause the vault.
+* Every decision, payout list and ledger entry is published for independent verification.
 
-* **NEAR side**
-  * `treasury:available` (unreserved)
-  * `distribution:pool` (reserved)
-  * `distribution:claimable` (owed to holders)
-  * `bridge:outbound` (in transit)
-  * `equity:deposits` and `equity:distributed`
-* **SOL side**
-  * `trading:available`
-  * `trading:positions` (cost basis)
-  * `bridge:inbound`
-  * `pnl:realized`
-* **Both:** `expense:fees`
+## 4. Key features
 
-Reporting rules:
+| Feature | Detail |
+|---|---|
+| Telegram-native governance | `/connect`, one-tap DISTRIBUTE / AUTO HUNT buttons, pinned live tally |
+| Token-weighted, persistent votes | Balance snapshot at one block; strict majority; ties keep the mode |
+| NEAR vault with on-chain rules | No withdraw or upgrade method; 50 NEAR / 24h trading cap; 12h AUTO HUNT time lock; 24h payout veto window |
+| Holder Council | Top 20 holders, seats contested on chain via `ft_balance_of`; 5 seats veto or pause |
+| NEAR Intents funding | `fund_trading` wraps NEAR and deposits to a 1Click address in one atomic receipt |
+| Graduation Momentum engine | Continuous discovery, explainable 0–1 score, on-chain safety checks, sell-back quote, exit ladder |
+| Transparent accounting | Append-only double-entry ledger in integer units; public audit endpoints |
+| Paper/live parity | Same engine trades paper fills on real Jupiter quotes; shadow books compare variants |
 
-* **Realized P&L** comes only from settled sells (actual SOL out vs. actual SOL in, fees included) and
-  write-offs.
-* **Unrealized P&L** uses executable sell quotes and is always labeled as such.
-* **Deposits** are credited only from `CREATOR_WALLET_ADDRESS` (or `DEPOSIT_ALLOWED_SENDERS`), once per
-  on-chain receipt. Everything else is recorded as an unattributed inflow.
+## 5. How BAGFLIP works
 
-### Strategy
-
-The strategy is **Graduation Momentum**. It hunts Pump.fun tokens near curve completion or freshly
-migrated to PumpSwap, entering when volume accelerates with buy pressure, confirmed on two scans,
-safety-checked on chain, and only if a real buy-then-sell round trip is affordable. Exits are a −30%
-stop, a +80% partial take-profit, a 25% trailing stop, crash/liquidity-collapse emergency exits, a
-momentum-decay exit and a 24h cap. Full rationale and tradeoffs: [docs/STRATEGY.md](docs/STRATEGY.md).
-
-## Repository layout
-
-The suggested `apps/` + `packages/` split was flattened into one Node package. At this scale a
-monorepo's build tooling buys nothing; the module boundaries are the same.
-
-```
-src/
-  main.ts            entry (ROLE=all|bot|api|worker)
-  app.ts             composition root: picks sim/paper/live adapters per BAGFLIP_ENV
-  shared/            config (validated), fixed-point money, MYT boundary math, redacting logger, outbox
-  db/                Postgres + PGlite adapter, migrations runner, advisory locks
-  jobs/              durable Postgres job queue (SKIP LOCKED, leases, retries, idempotent keys)
-  near/              RPC, NEP-413 verify, chain abstraction (RPC+FastNEAR | simulated), tx signer
-  governance/        engine (pure), wallets+votes, daily cycle
-  treasury/          ledger, deposits, routing, prices
-  bridge/            1Click client, depositors (NEAR wrap+ft_transfer / SOL transfer), state machine
-  market/            DexScreener + PumpPortal discovery (MarketDataProvider), on-chain SafetyChecker
-  strategy/          scoring + exits (StrategyEngine, pure), historical replay
-  solana/            RPC + settlement parsing; execution/ adapters: live (Jupiter V2, PumpPortal), paper, simulated
-  trading/           PositionManager, RiskController, HuntEngine, PnL, reconciliation
-  distribution/      holder index, pro-rata distribution, Merkle payout lists, vault sync, claims
-  bot/               grammY bot, views, pinned governance message, outbox sender
-  api/               HTTP server, wallet Mini App, Telegram initData validation
-  worker/            job handlers + loops
-contracts/vault/          the keyless treasury contract (Rust, near-sdk 5.30), its tests, Merkle vectors, built wasm
-migrations/               001 full schema (append-only triggers), 002 vault payout lists + mode syncs
-scripts/                  migrate, dev-seed, verify-live, paper-scan, sync-holders, replay, vault-plan, gen-merkle-vectors
-tests/                    vitest suites (PGlite; no network)
+```mermaid
+flowchart LR
+  T[BAGFLIP trades on justhoot] -->|creator fee share, paid in wNEAR| V[(bagflip-vault.near)]
+  H[Holders in Telegram] -->|NEP-413 link + vote| B[BAGFLIP service]
+  B -->|daily decision + snapshot hash| V
+  V -->|DISTRIBUTE: Merkle claims after 24h| C[Holder wallets]
+  V -->|AUTO HUNT: capped fund_trading| I[NEAR Intents 1Click]
+  I --> S[Solana trading wallet]
+  S -->|Graduation Momentum trades| S
+  S -->|wind-down: SOL back via 1Click| V
 ```
 
-## Running locally
+1. **Revenue.** The justhoot launchpad pays BAGFLIP's creator ("dev") fee share to `bagflip-vault.near`.
+2. **Treasury.** The vault holds the funds; the service mirrors them in a double-entry ledger.
+3. **Vote.** Linked holders vote; at 00:00 MYT the engine snapshots balances and decides.
+4. **Act.** DISTRIBUTE publishes a payout list (claimable after a 24h veto window). AUTO HUNT waits for
+   the 12h time lock, then bridges capped amounts and trades.
+5. **Account.** Deposits, transfers, fills, fees and realized P&L are journaled and published.
+6. **Repeat.** New fees and settled trading proceeds return to the same governance loop.
 
-Requirements: Node 24+ (it runs the TypeScript directly) and pnpm. Docker is optional.
+## 6. AUTO HUNT overview
+
+Graduation Momentum targets Pump.fun tokens that have already proven demand: tokens near bonding-curve
+completion and fresh PumpSwap graduates. Each scan runs discovery (PumpPortal, GeckoTerminal,
+DexScreener) → hard filters → weighted score → confirmation → on-chain safety (mint/freeze authority,
+risky Token-2022 extensions, holder concentration) → an executable buy-then-sell quote → sizing. That
+means up to 4 positions at 25% of trading capital each. Exits use executable sell quotes: stop loss,
+partial take-profit, trailing stop, crash and liquidity-collapse exits, momentum fade and a 24h maximum
+hold. Full pipeline and parameters: **[docs/AUTO_HUNT.md](docs/AUTO_HUNT.md)**.
+
+## 7. Economic model & sustainability
+
+* **Primary revenue:** BAGFLIP's creator fee share on the justhoot launchpad. On chain, the launchpad
+  reports a 5% transfer fee and a 1% pool fee for BAGFLIP, a dev share of 100% (`token_owner_bps = 10000`),
+  and `dev_id = bagflip-vault.near`.
+* **Optional growth:** AUTO HUNT may grow or shrink the capital it is given; it is not recurring revenue.
+* **No fixed payouts.** Distributions are a share of whatever the vault holds; nothing is promised.
+* **Bounded spending.** Trading is capped per 24h, reserved claims can never be traded, and small
+  balances accumulate until transfers are economical ($20 minimum).
+
+Details, costs and behaviour when revenue declines: **[docs/ECONOMICS.md](docs/ECONOMICS.md)**.
+
+## 8. Why NEAR
+
+| NEAR component | What it does in BAGFLIP |
+|---|---|
+| NEP-141 token | BAGFLIP balances are the voting power and the distribution weights (`ft_balance_of` at one block) |
+| NEP-413 signatures | Proves wallet ownership to link a NEAR account to a Telegram user; no keys or seed phrases |
+| Smart-contract vault | Holds creator revenue; enforces claims, caps, time locks, vetoes and the Holder Council |
+| Function-call keys | The bot's operator key can call only 9 vault methods, with a 0.25 NEAR gas allowance |
+| NEAR Intents (1Click) | Moves treasury capital from NEAR to the Solana trading wallet and back |
+| On-chain records | Mode proposals with snapshot hashes, payout-list roots, claims and trading transfers are vault events |
+
+More: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/GOVERNANCE.md](docs/GOVERNANCE.md),
+[docs/TREASURY.md](docs/TREASURY.md).
+
+## 9. Technical architecture
+
+One Node 24 service (TypeScript, run directly), PostgreSQL, a Rust vault contract (near-sdk 5.30.1), the
+Telegram Bot API, NEAR RPC, NEAR Intents 1Click, Jupiter, PumpPortal, GeckoTerminal and DexScreener.
+Component map, trust boundaries and data model: **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
+
+```
+contracts/vault/   Rust vault: claims, caps, time locks, Holder Council (17 tests)
+src/governance/    NEP-413 linking, votes, daily decision engine
+src/treasury/      double-entry ledger, deposits, routing
+src/distribution/  holder index, pro-rata, Merkle lists, vault sync, claims
+src/bridge/        NEAR Intents 1Click client and transfer state machine
+src/market/ src/strategy/ src/trading/ src/solana/   AUTO HUNT
+src/bot/ src/api/  Telegram bot, HTTP API, wallet-signing page
+```
+
+## 10. Getting started
+
+Requirements: Node ≥ 24, pnpm 10. Docker is optional (contract tests, Postgres).
 
 ```bash
 pnpm install
+pnpm test                      # 77 tests, embedded Postgres, no network
 ```
 
-```bash
-cp .env.example .env
-```
+Full local walkthrough (development mode, no keys): [docs/DEMO_AND_TESTING.md](docs/DEMO_AND_TESTING.md).
 
-```bash
-pnpm test
-```
+## 11. Demo & reproducibility
 
-**Development** uses a simulated chain, market and bridge, embedded Postgres, and no network.
-1. Set `BAGFLIP_ENV=development`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_GROUP_ID` and `TELEGRAM_ADMIN_IDS` in
-   `.env`.
-2. Optionally seed: `node --env-file=.env scripts/dev-seed.ts` (stop the app first; PGlite is
-   single-process).
-3. Start the app:
+| Do | See |
+|---|---|
+| `pnpm test` | `Tests 77 passed (77)` |
+| Run the contract tests in Docker ([commands](docs/DEMO_AND_TESTING.md#2-vault-contract-tests)) | `17 passed; 0 failed` |
+| Seed and start development mode, then `curl localhost:8080/public/decisions` | Daily decision with block, weights, quorum and reason |
+| `node scripts/paper-compare.ts --minutes 10` | Paper trades on live Solana data, scanner funnel per variant |
+| `curl https://bagflip-production.up.railway.app/public/vault` | Live vault status and Holder Council read from mainnet |
+| In Telegram: `/connect` to @bagflip_bot, then vote in the group | Wallet verified, vote recorded, tally updated |
 
-```bash
-node --env-file=.env src/main.ts
-```
+## 12. Hackathon scope & implementation status
 
-In development the admin commands `/sim_deposit 10` and `/sim_balance alice.near 5000` drive the
-simulation. Three tokens labeled SIM random-walk so AUTO HUNT has something to trade.
+All code in this repository was written during NEAR HACKATHON (first commit 2026-11-11). There is no
+pre-hackathon baseline, and no other project is submitted by this team.
 
-The **wallet Mini App needs HTTPS**. For a local Telegram test, expose port 8080 with a tunnel such as
-`cloudflared tunnel --url http://localhost:8080` and set `PUBLIC_URL` to the tunnel URL.
-
-**Paper** uses real NEAR balances and deposits, real market data and real Jupiter quotes, with virtual
-capital:
-
-1. Set `BAGFLIP_ENV=paper`, `MEME_TOKEN_CONTRACT_ID=bagflip.v2-launchpad.justhoot.near`,
-   `TREASURY_NEAR_ADDRESS=<bagflip treasury>` and `CREATOR_WALLET_ADDRESS=<creator>`.
-2. Run `node --env-file=.env scripts/verify-live.ts` (read-only checks of every integration).
-3. Run `node --env-file=.env src/main.ts`, and later `node --env-file=.env scripts/replay.ts`.
-
-**With Postgres:**
-
-```bash
-docker compose up --build
-```
-
-## Production (Railway)
-
-1. Create a Railway project with a **PostgreSQL** plugin. Deploy this repo; `railway.json` and the
-   `Dockerfile` are picked up. Keep **1 replica**.
-2. Set the variables from `.env.example`:
-   * `DATABASE_URL`
-   * `PUBLIC_URL` (the Railway HTTPS domain)
-   * `TELEGRAM_*`, including `TELEGRAM_WEBHOOK_SECRET`
-   * `ADMIN_API_TOKEN`
-   * the NEAR and Solana addresses
-   * `ONECLICK_API_KEY` and `JUPITER_API_KEY` (recommended)
-   * a paid `SOLANA_RPC_URL` (recommended)
-3. Start with `BAGFLIP_ENV=paper`. In the group, an admin runs `/post_governance` (the bot needs
-   pin-message rights). Verify `/status`, `/connect`, votes and the midnight decision.
-4. Go live in this order, checking `/admin/status` and the reconcile report after each step:
-   1. `BAGFLIP_ENV=live` with both `LIVE_*` flags still false. Real deposits and decisions run, nothing
-      moves.
-   2. `LIVE_TRANSFERS_ENABLED=true` plus the **operator** key (`OPERATOR_ACCOUNT_ID`,
-      `OPERATOR_PRIVATE_KEY`). The bot can now call the vault. Deploy and lock the vault first with
-      [docs/VAULT.md](docs/VAULT.md); there is no treasury key at all.
-   3. `LIVE_TRADING_ENABLED=true` plus `SOLANA_TRADING_PRIVATE_KEY`. Trading starts.
-5. Emergency stop: `/pause` in Telegram, `POST /admin/pause {"paused":true}`, or `EMERGENCY_PAUSE=true`.
-
-## Telegram commands
-
-* **Everyone:** `/start` `/help` `/vote` `/status` `/treasury` `/trades` `/pnl` `/disclosures`
-* **DM only:** `/connect` `/power` `/claim` `/disconnect <account>`
-* **Admins:** `/pause` `/resume` `/deposit <near_tx_hash>` (credit a historical deposit after on-chain
-  verification) `/post_governance` `/admin`
-* **Development:** `/sim_deposit` `/sim_balance`
-
-The group gets one pinned governance message with **💰 DISTRIBUTE / 🔥 AUTO HUNT** buttons, edited in
-place (debounced, never one post per vote). Announcements go through an outbox with idempotency keys
-and are rate-limited: significant deposits, daily decisions, mode changes, position opens and closes,
-claimable distributions, treasury failures and pauses.
-
-## Tests
-
-`pnpm test` runs 70 tests against embedded Postgres, with no network. The vault contract adds 17 Rust
-tests (see docs/VAULT.md). They cover every scenario in the
-brief:
-
-| # | Scenario | Test |
+| Component | Status | Evidence |
 |---|---|---|
-| 1–3 | 80/20 activates AUTO HUNT, persists, switches at 55% | governance.test.ts |
-| 4 | 50/50 keeps the previous mode | governance.test.ts |
-| 5 | changing a vote replaces it | governance.test.ts |
-| 6 | selling half halves weight at the next snapshot | governance.test.ts |
-| 7 | the same tokens across wallets count once; an account can't be linked twice | governance.test.ts |
-| 8 | rewards during AUTO HUNT are bridged, credited only after settlement | treasury-trading.test.ts |
-| 9–10 | total loss of trading capital; new rewards fund it again | treasury-trading.test.ts |
-| 11 | DISTRIBUTE wins with open positions → unwind, return, distribute | treasury-trading.test.ts |
-| 12 | too little capital for fees → no order | treasury-trading.test.ts |
-| 13 | bridge refunded / failed / quote error | treasury-trading.test.ts |
-| 14 | retrying a completed claim pays nothing twice | treasury-trading.test.ts |
-| 15 | worker restart with an open trade, and with an order persisted mid-flight | treasury-trading.test.ts |
-| 16 | scheduler triggered twice → one decision | governance.test.ts |
-| 17 | reserved distribution money can't be traded | treasury-trading.test.ts |
-| 18 | failed/expired submissions never book a trade | treasury-trading.test.ts |
+| BAGFLIP token + creator-fee routing to vault | **Live on mainnet** | `get_token_fee_state` → `dev_id: bagflip-vault.near` |
+| Vault contract | **Deployed on mainnet** | Code hash above; `get_config`; 17 Rust tests |
+| Holder Council seats | **Live** (2 seats filled on chain) | `get_seats` |
+| Telegram bot, NEP-413 linking, voting, daily decision | **Live** | Bot and group above; `/public/decisions` |
+| Operator key → vault calls | **Live** (`bagflip-bot.near` seated the council via `claim_seat`; each daily decision is sent as `propose_mode`) | Vault events, `get_seats` |
+| Distribution + claims | Implemented and tested; awaiting first creator-fee payout | `tests/vault.test.ts`, `tests/treasury-trading.test.ts` |
+| NEAR Intents funding | Implemented; verified with real `dry` quotes | `src/bridge/`, `tests/units.test.ts` |
+| AUTO HUNT engine | **Paper mode on live market data**; live execution implemented, not yet enabled | `scripts/paper-compare.ts`, `src/solana/execution/live.ts` |
 
-They also cover:
+## 13. Security overview
 
-* NEP-413 attacks: replay, expiry, wrong message/nonce/recipient, foreign key, Telegram mismatch, lockout
-* Mini App `initData`, config safety and log redaction
-* fixed-point maths and pro-rata ($100 → 10/30/60)
-* strategy scoring and exits, the 1Click client, the paper fill model and replay
-* the bot handlers (rendering, votes, DM-only flows, admin auth and audit)
+The vault has no withdraw or upgrade method. Funds leave only through holder claims or capped, time-locked
+trading transfers, and the Holder Council can veto or pause. During the hackathon the vault account still
+has its deployer's full-access key, kept for recoverability. Deleting it (locking) is a documented
+one-way step. The bot holds a function-call operator key and, for AUTO HUNT, the Solana trading-wallet key;
+the vault cap bounds what can reach that wallet. AUTO HUNT trades high-volatility assets, and losses can
+include the full allocated amount. Full trust model: **[docs/SECURITY.md](docs/SECURITY.md)**.
 
-## Status: what works, and what still needs credentials, funding or approval
+## 14. Future development
 
-**Verified working (tested locally, plus read-only checks against mainnet on 2026-11-09):**
+* Lock the vault (delete its keys) and publish a reproducible build.
+* Enable live AUTO HUNT with a small allocation once creator-fee payouts arrive.
+* Move the Solana trading key into a TEE-attested agent.
+* Exclude launchpad and pool accounts from council seats through a council admin action.
 
-* Wallet linking (NEP-413), continuous weighted voting, the daily MYT decision engine, quorum, the INACTIVE
-  start, and audit records.
-* Treasury ledger: deposits, reservations, routing by mode, reconciliation and integrity checks.
-* The 1Click workflow, quotes, status handling, refund and failure paths (simulated provider). The real
-  API was verified with dry quotes in both directions: 5 wNEAR → 0.2028 SOL, about 17s.
-* The scanner on real DexScreener and PumpPortal data; Jupiter Swap V2 quotes on a live Pump.fun curve
-  token; Solana mint-safety reads.
-* Paper and simulated execution, the position lifecycle, P&L, wind-down, write-off and restart recovery.
-* Pro-rata distribution and claims (payout simulated outside live), and the holder index from FastNEAR
-  event history.
-* Telegram bot handlers and the HTTP API. The app boots under Node 24 in development mode.
-* The vault contract compiles to wasm, and its 17 unit tests pass. They cover:
-  * claims only paying the listed account, once, after the veto window
-  * vetoes, the time-locked AUTO HUNT and the 24h cap
-  * the on-chain Holder Council (seat contests by balance, seat age, vote thresholds)
-  * pause and admin thresholds
-  * Merkle vectors shared with the TypeScript side
+## 15. Relevant links
 
-  The bot's vault flows are tested end to end against an in-process model of the same rules.
-* The Docker image builds and runs against PostgreSQL 17: migrations apply, jobs run, and a restart
-  doesn't duplicate decisions or jobs.
-* The wallet Mini App loads its challenge and opens the NEAR Connect wallet selector (checked in a
-  browser; signing needs a real wallet).
-* There's no Redis: at this scale a Postgres job queue (`FOR UPDATE SKIP LOCKED`, leases, unique keys)
-  gives the same durability with one fewer service to run and pay for.
+| Document | Content |
+|---|---|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Components, data flow, trust boundaries, data model |
+| [docs/GOVERNANCE.md](docs/GOVERNANCE.md) | Voting rules, snapshots, Holder Council, on-chain enforcement |
+| [docs/AUTO_HUNT.md](docs/AUTO_HUNT.md) | Graduation Momentum pipeline and parameters |
+| [docs/ECONOMICS.md](docs/ECONOMICS.md) | Revenue, allocation, costs, sustainability |
+| [docs/TREASURY.md](docs/TREASURY.md) | Vault contract, claims, caps, deployment record |
+| [docs/SECURITY.md](docs/SECURITY.md) | Keys, custody, authentication, idempotency, disclosures |
+| [docs/DEMO_AND_TESTING.md](docs/DEMO_AND_TESTING.md) | Reproducible steps with expected results |
+| [LICENSE](LICENSE) | MIT |
 
-**Built but not yet exercised with real funds or credentials** (this needs your approval and setup):
-
-* **Live Solana execution** (`src/solana/execution/live.ts`). Jupiter `/order` + `/execute` and the
-  PumpPortal `trade-local` fallback, with simulation before send and token-account close. Not yet run with
-  a signing key; it needs a funded `TRADING_WALLET_ADDRESS` key and `LIVE_TRADING_ENABLED=true`. Do a
-  first live run with a tiny balance.
-* **The vault contract on mainnet.** It builds (256 KB wasm) and passes 17 unit tests, plus the bot's
-  integration tests against an identical in-process model. It is **not deployed** and has not been run
-  in the NEAR sandbox or on testnet.
-  * Rehearse on testnet (a tiny payout list, a claim, a veto) before deploying to `bagflip.near`.
-  * Use a reproducible build so others can verify the code hash.
-  * Only then delete the keys; locking is irreversible.
-* **Live 1Click deposits.** The vault's `fund_trading` wraps and `ft_transfer`s to the deposit address
-  (with `storage_deposit`) in one receipt; the SOL side does a native transfer. Not yet done for real.
-  1Click's docs do not explicitly state the NEAR deposit mechanics, so do the first transfer at the $20
-  minimum and watch `/admin/status`.
-* **Live claim payouts** through the vault's `claim_many`. Not yet done for real.
-* **Telegram in a real group.** Needs a bot token, a group with pin rights, and an HTTPS `PUBLIC_URL` for
-  the Mini App. The NEAR Connect wallet flow (`@hot-labs/near-connect` via esm.sh) has not been clicked
-  through with a real wallet. Backend verification is fully tested, and a manual-paste fallback exists.
-* **Deposit auto-detection** depends on the FastNEAR transaction API. If it lags, admins can credit by
-  hash with `/deposit`.
-* **A full distribution snapshot on real data.** The holder index was built from real chain history
-  (a test token with 4,275 transactions → 501 holder accounts, marked complete), and sampled balance reads
-  pinned to one block succeeded. Reading all 501 balances in one pass was throttled (HTTP 429) by the
-  **free** FastNEAR RPC from this machine after several full scans in one day. **Use a keyed
-  `NEAR_RPC_URL` in production.** The client paces about 15 req/s and backs off, and the distribution
-  job retries, but a free endpoint can still stall it. The daily governance snapshot only reads voting
-  wallets, so it's much lighter.
-
-**Decisions only you can make before going live:**
-
-* the BAGFLIP treasury account and the trading wallet (to be created and published)
-* the exact `EXCLUDED_HOLDER_ACCOUNTS` (verify pool, bridge and launchpad accounts)
-* quorum values
-* whether the creator's own BAGFLIP should vote (add it to the exclusions if not)
-* legal review (see the compliance doc)
-
-**Known limitations:**
-
-* Holder discovery = FastNEAR event history ∪ top-100 ∪ registered wallets. Treat it as complete only
-  when `holder_source` says `complete`.
-* Unclaimed rewards stay reserved indefinitely (there's no expiry policy yet).
-* The trading loop polls every 15–30s, so it can't react inside a single block.
+**Built with:** Node.js 24, TypeScript, PostgreSQL / PGlite, grammY, `@near-js/*`, `@solana/web3.js`,
+zod, vitest, Rust + near-sdk, Docker, Railway. Wallet page: NEAR Wallet Selector (Meteor) and
+`@hot-labs/near-connect`. Development was assisted by Claude Code (AI).
